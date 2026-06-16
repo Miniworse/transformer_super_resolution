@@ -222,8 +222,11 @@ class LatentNoiseState(nn.Module):
 
         latent_logvar = latent_logvar.clamp(-10.0, 5.0)
         prior_logvar = prior_logvar.clamp(-10.0, 5.0)
-        eps = torch.randn_like(latent_mean)
-        z = latent_mean + eps * torch.exp(0.5 * latent_logvar)
+        if self.training:
+            eps = torch.randn_like(latent_mean)
+            z = latent_mean + eps * torch.exp(0.5 * latent_logvar)
+        else:
+            z = latent_mean
         return self.to_model(z), latent_mean, latent_logvar, prior_mean, prior_logvar
 
 
