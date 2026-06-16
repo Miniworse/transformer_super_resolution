@@ -186,6 +186,7 @@ def main() -> None:
     parser.add_argument("--input-suffix", default="unnoised")
     parser.add_argument("--target-suffix", default=None)
     parser.add_argument("--target-is-noisy", action="store_true")
+    parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--expand-ids", default="0,1,2,3,4")
     parser.add_argument("--train-scenes", default="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,"
                         "21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,"
@@ -226,6 +227,7 @@ def main() -> None:
         expand_ids=parse_int_list(args.expand_ids),
         input_suffix=args.input_suffix,
         target_suffix=args.target_suffix,
+        include_virtual_context=args.include_virtual_context,
     )
     val_dataset = SRVisibilityDataset(
         args.data_root,
@@ -233,6 +235,7 @@ def main() -> None:
         expand_ids=parse_int_list(args.expand_ids),
         input_suffix=args.input_suffix,
         target_suffix=args.target_suffix,
+        include_virtual_context=args.include_virtual_context,
     )
 
     train_loader = DataLoader(

@@ -52,6 +52,7 @@ def main() -> None:
     parser.add_argument("--input-suffix", default=None)
     parser.add_argument("--target-suffix", default=None)
     parser.add_argument("--target-is-noisy", action="store_true")
+    parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--expand-ids", default=None)
     parser.add_argument("--test-scenes", default="91,92,93,94,95,96,97,98,99,100")
     parser.add_argument("--batch-size", type=int, default=2)
@@ -69,6 +70,11 @@ def main() -> None:
     target_suffix = args.target_suffix if args.target_suffix is not None else ckpt_args.get("target_suffix")
     expand_ids = parse_int_list(args.expand_ids or ckpt_args.get("expand_ids", "0,1,2,3,4"))
     target_is_noisy = args.target_is_noisy or bool(ckpt_args.get("target_is_noisy", False))
+    include_virtual_context = (
+        bool(ckpt_args.get("include_virtual_context", False))
+        if args.include_virtual_context is None
+        else args.include_virtual_context
+    )
 
     dataset = SRVisibilityDataset(
         data_root,
@@ -76,6 +82,7 @@ def main() -> None:
         expand_ids=expand_ids,
         input_suffix=input_suffix,
         target_suffix=target_suffix,
+        include_virtual_context=include_virtual_context,
     )
     loader = DataLoader(
         dataset,
