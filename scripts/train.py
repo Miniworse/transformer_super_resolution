@@ -104,6 +104,14 @@ def log_tensorboard_scalars(writer, metrics: dict[str, float], step: int, prefix
             writer.add_scalar(f"{prefix}/{key}", value, step)
 
 
+def serializable_args(args: argparse.Namespace) -> dict[str, object]:
+    """Convert argparse values to checkpoint-safe Python primitives."""
+    result = {}
+    for key, value in vars(args).items():
+        result[key] = str(value) if isinstance(value, Path) else value
+    return result
+
+
 def make_uv_figure(batch: VisibilityRegionInput, pred: Tensor, max_points: int = 2500):
     import matplotlib.pyplot as plt
 
@@ -284,7 +292,7 @@ def main() -> None:
             "epoch": epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "args": vars(args),
+            "args": serializable_args(args),
             "val_metrics": val_metrics,
         }
         torch.save(checkpoint, args.run_dir / "checkpoints" / "last.pt")

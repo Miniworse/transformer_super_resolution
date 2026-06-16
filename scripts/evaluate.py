@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import pickle
 import sys
+import warnings
 
 import torch
 from torch.utils.data import DataLoader
@@ -29,6 +31,19 @@ from visibility_transformer import (  # noqa: E402
 )
 
 
+def load_checkpoint(path: Path) -> dict:
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except pickle.UnpicklingError:
+        warnings.warn(
+            "Falling back to weights_only=False for a legacy trusted checkpoint. "
+            "Re-save the checkpoint with the current training script to avoid this fallback.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=PROJECT_ROOT / "runs" / "bvt_v1" / "checkpoints" / "best.pt")
@@ -45,7 +60,7 @@ def main() -> None:
     parser.add_argument("--write-tensorboard", action="store_true")
     args = parser.parse_args()
 
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    checkpoint = load_checkpoint(args.checkpoint)
     ckpt_args = checkpoint.get("args", {})
 
     data_root = args.data_root or Path(ckpt_args.get("data_root", PROJECT_ROOT / "srdata" / "srdata16Juin" / "interval5_AMtown01"))
