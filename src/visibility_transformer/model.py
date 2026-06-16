@@ -123,29 +123,49 @@ class UVFourierEncoding(nn.Module):
     visible to attention without assuming a rectangular grid.
     """
 
-    def __init__(self, coord_dim: int, num_frequencies: int = 16, max_frequency: float = 64.0) -> None:
+    def __init__(
+        self,
+        coord_dim: int,
+        num_frequencies: int = 16,
+        max_frequency: float = 64.0,
+        normalize_coords: bool = False,
+    ) -> None:
         super().__init__()
         if coord_dim < 2:
             raise ValueError("coord_dim must include at least u and v.")
         self.coord_dim = coord_dim
         self.num_frequencies = num_frequencies
+        self.normalize_coords = normalize_coords
         freqs = torch.logspace(0.0, math.log10(max_frequency), num_frequencies)
         self.register_buffer("freqs", freqs, persistent=False)
 
     @property
     def out_dim(self) -> int:
-        # raw coords + radius + angle + sin/cos for every coordinate/frequency
-        return self.coord_dim + 2 + 2 * self.coord_dim * self.num_frequencies
+        # coords + radius + angle + optional scale + sin/cos for every coordinate/frequency
+        scale_dim = 1 if self.normalize_coords else 0
+        return self.coord_dim + 2 + scale_dim + 2 * self.coord_dim * self.num_frequencies
 
     def forward(self, coords: Tensor) -> Tensor:
-        uv = coords[..., :2]
+        if self.normalize_coords:
+            raw_radius = torch.linalg.norm(coords[..., :2], dim=-1, keepdim=True)
+            coord_scale = raw_radius.amax(dim=1, keepdim=True).clamp_min(1e-6)
+            encoded_coords = coords / coord_scale
+        else:
+            coord_scale = None
+            encoded_coords = coords
+
+        uv = encoded_coords[..., :2]
         radius = torch.linalg.norm(uv, dim=-1, keepdim=True)
         angle = torch.atan2(uv[..., 1:2], uv[..., 0:1])
 
-        scaled = coords.unsqueeze(-1) * self.freqs.to(coords.dtype) * (2.0 * math.pi)
+        scaled = encoded_coords.unsqueeze(-1) * self.freqs.to(coords.dtype) * (2.0 * math.pi)
         fourier = torch.cat([torch.sin(scaled), torch.cos(scaled)], dim=-1)
         fourier = fourier.flatten(start_dim=-2)
-        return torch.cat([coords, radius, angle, fourier], dim=-1)
+        if coord_scale is None:
+            return torch.cat([encoded_coords, radius, angle, fourier], dim=-1)
+
+        log_scale = torch.log1p(coord_scale).expand(*encoded_coords.shape[:2], 1)
+        return torch.cat([encoded_coords, radius, angle, log_scale, fourier], dim=-1)
 
 
 class VisibilityTokenEmbedder(nn.Module):
@@ -158,10 +178,11 @@ class VisibilityTokenEmbedder(nn.Module):
         redundancy_dim: int = 2,
         num_frequencies: int = 16,
         max_frequency: float = 64.0,
+        normalize_coords: bool = False,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
-        self.coord_encoding = UVFourierEncoding(coord_dim, num_frequencies, max_frequency)
+        self.coord_encoding = UVFourierEncoding(coord_dim, num_frequencies, max_frequency, normalize_coords)
         self.value_proj = MLP(2, model_dim, model_dim, dropout)
         self.coord_proj = MLP(self.coord_encoding.out_dim, model_dim, model_dim, dropout)
         self.redundancy_proj = MLP(redundancy_dim, model_dim, model_dim, dropout)
@@ -225,6 +246,7 @@ class BayesianVisibilityTransformer(nn.Module):
         num_heads: int = 8,
         num_frequencies: int = 16,
         max_frequency: float = 64.0,
+        normalize_coords: bool = False,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
@@ -234,6 +256,7 @@ class BayesianVisibilityTransformer(nn.Module):
             redundancy_dim=redundancy_dim,
             num_frequencies=num_frequencies,
             max_frequency=max_frequency,
+            normalize_coords=normalize_coords,
             dropout=dropout,
         )
 

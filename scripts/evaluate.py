@@ -93,6 +93,7 @@ def main() -> None:
         num_layers=int(ckpt_args.get("num_layers", 8)),
         num_heads=int(ckpt_args.get("num_heads", 8)),
         num_frequencies=int(ckpt_args.get("num_frequencies", 16)),
+        normalize_coords=bool(ckpt_args.get("normalize_coords", False)),
         dropout=float(ckpt_args.get("dropout", 0.1)),
     )
     model.load_state_dict(checkpoint["model"])

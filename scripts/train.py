@@ -184,6 +184,7 @@ def main() -> None:
     parser.add_argument("--num-layers", type=int, default=8)
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--num-frequencies", type=int, default=16)
+    parser.add_argument("--normalize-coords", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--num-workers", type=int, default=0)
@@ -237,6 +238,7 @@ def main() -> None:
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         num_frequencies=args.num_frequencies,
+        normalize_coords=args.normalize_coords,
         dropout=args.dropout,
     ).to(device)
 
