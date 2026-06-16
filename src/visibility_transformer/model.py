@@ -81,15 +81,26 @@ def masked_mean(x: Tensor, mask: Optional[Tensor], dim: int) -> Tensor:
     return (x * weights).sum(dim=dim) / weights.sum(dim=dim).clamp_min(1.0)
 
 
-def gaussian_nll(target: Tensor, mean: Tensor, logvar: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+def gaussian_nll(
+    target: Tensor,
+    mean: Tensor,
+    logvar: Tensor,
+    mask: Optional[Tensor] = None,
+    weight: Optional[Tensor] = None,
+) -> Tensor:
     """Masked diagonal Gaussian negative log likelihood for complex visibility."""
     logvar = logvar.clamp(-14.0, 8.0)
     loss = 0.5 * (math.log(2.0 * math.pi) + logvar + (target - mean).pow(2) * torch.exp(-logvar))
     loss = loss.sum(dim=-1)
-    if mask is None:
+    if mask is None and weight is None:
         return loss.mean()
-    mask = mask.to(loss.dtype)
-    return (loss * mask).sum() / mask.sum().clamp_min(1.0)
+    if mask is None:
+        weights = torch.ones_like(loss)
+    else:
+        weights = mask.to(loss.dtype)
+    if weight is not None:
+        weights = weights * weight.to(loss.dtype)
+    return (loss * weights).sum() / weights.sum().clamp_min(1.0)
 
 
 def kl_normal(mean: Tensor, logvar: Tensor, prior_mean: Tensor, prior_logvar: Tensor) -> Tensor:
@@ -323,6 +334,7 @@ def training_objective(
     target_is_noisy: bool = True,
     beta_kl: float = 1e-3,
     beta_noise_prior: float = 1e-4,
+    target_weight: Optional[Tensor] = None,
 ) -> tuple[Tensor, dict[str, Tensor]]:
     """Default objective for noisy-label denoising and virtual-array SR.
 
@@ -332,7 +344,7 @@ def training_objective(
     """
 
     likelihood_logvar = output.total_logvar if target_is_noisy else output.clean_logvar
-    nll = gaussian_nll(target_values, output.clean_mean, likelihood_logvar, target_mask)
+    nll = gaussian_nll(target_values, output.clean_mean, likelihood_logvar, target_mask, target_weight)
     kl = kl_normal(output.latent_mean, output.latent_logvar, output.prior_mean, output.prior_logvar)
 
     # Mildly discourages explaining every error as measurement noise while still

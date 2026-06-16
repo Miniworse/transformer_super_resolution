@@ -89,6 +89,14 @@ def compute_metrics(batch: VisibilityRegionInput, pred: Tensor) -> dict[str, flo
     return metrics
 
 
+def make_target_weight(batch: VisibilityRegionInput, expanded_loss_weight: float) -> Tensor | None:
+    if expanded_loss_weight == 1.0:
+        return None
+    expanded_only = batch.virtual_mask & ~batch.original_mask
+    weights = torch.ones_like(batch.target_mask, dtype=batch.target_values.dtype)
+    return weights.masked_fill(expanded_only, expanded_loss_weight)
+
+
 def average_metric_dict(metrics: Iterable[dict[str, float]]) -> dict[str, float]:
     values: dict[str, list[float]] = {}
     for item in metrics:
@@ -141,7 +149,13 @@ def make_uv_figure(batch: VisibilityRegionInput, pred: Tensor, max_points: int =
     return fig
 
 
-def evaluate(model: BayesianVisibilityTransformer, loader: DataLoader, device: torch.device, target_is_noisy: bool) -> dict[str, float]:
+def evaluate(
+    model: BayesianVisibilityTransformer,
+    loader: DataLoader,
+    device: torch.device,
+    target_is_noisy: bool,
+    expanded_loss_weight: float = 1.0,
+) -> dict[str, float]:
     model.eval()
     losses = []
     metric_items = []
@@ -149,7 +163,13 @@ def evaluate(model: BayesianVisibilityTransformer, loader: DataLoader, device: t
         for batch in loader:
             batch = move_batch(batch, device)
             out = model(batch.values, batch.coords, batch.known_mask, batch.redundancy, batch.token_mask)
-            loss, loss_metrics = training_objective(out, batch.target_values, batch.target_mask, target_is_noisy)
+            loss, loss_metrics = training_objective(
+                out,
+                batch.target_values,
+                batch.target_mask,
+                target_is_noisy,
+                target_weight=make_target_weight(batch, expanded_loss_weight),
+            )
             losses.append(float(loss.detach().cpu()))
             item = {key: float(value.cpu()) for key, value in loss_metrics.items()}
             item.update(compute_metrics(batch, out.clean_mean))
@@ -179,6 +199,7 @@ def main() -> None:
     parser.add_argument("--context-dropout", type=float, default=0.15)
     parser.add_argument("--beta-kl", type=float, default=1e-3)
     parser.add_argument("--beta-noise-prior", type=float, default=1e-4)
+    parser.add_argument("--expanded-loss-weight", type=float, default=1.0)
     parser.add_argument("--model-dim", type=int, default=256)
     parser.add_argument("--latent-dim", type=int, default=64)
     parser.add_argument("--num-layers", type=int, default=8)
@@ -261,6 +282,7 @@ def main() -> None:
                 target_is_noisy=args.target_is_noisy,
                 beta_kl=args.beta_kl,
                 beta_noise_prior=args.beta_noise_prior,
+                target_weight=make_target_weight(batch, args.expanded_loss_weight),
             )
 
             optimizer.zero_grad(set_to_none=True)
@@ -278,7 +300,7 @@ def main() -> None:
             global_step += 1
 
         train_metrics = average_metric_dict(train_items)
-        val_metrics = evaluate(model, val_loader, device, args.target_is_noisy)
+        val_metrics = evaluate(model, val_loader, device, args.target_is_noisy, args.expanded_loss_weight)
         log_tensorboard_scalars(writer, train_metrics, epoch, "train_epoch")
         log_tensorboard_scalars(writer, val_metrics, epoch, "val_epoch")
 
