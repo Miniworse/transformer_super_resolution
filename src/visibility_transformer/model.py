@@ -22,8 +22,9 @@ The model predicts the clean visibility posterior for both known and unknown uv:
     clean_logvar:    [batch, n_token, 2]
     noise_logvar:    [batch, n_token, 2]
 
-For noisy training targets, use ``training_objective(..., target_is_noisy=True)``.
-The likelihood then marginalizes clean uncertainty and inferred label noise:
+For clean targets, keep ``target_is_noisy=False``. For noisy training targets,
+use ``target_is_noisy=True`` so the likelihood marginalizes clean uncertainty
+and inferred label noise:
     target_noisy ~ N(clean_mean, clean_var + noise_var)
 """
 
@@ -220,19 +221,15 @@ class LatentNoiseState(nn.Module):
             nn.LayerNorm(model_dim),
             nn.Linear(model_dim, 2 * latent_dim),
         )
-        self.prior = nn.Sequential(
-            nn.LayerNorm(model_dim),
-            nn.Linear(model_dim, 2 * latent_dim),
-        )
         self.to_model = nn.Linear(latent_dim, model_dim)
 
     def forward(self, tokens: Tensor, token_mask: Optional[Tensor]) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         pooled = masked_mean(tokens, token_mask, dim=1)
         latent_mean, latent_logvar = self.posterior(pooled).chunk(2, dim=-1)
-        prior_mean, prior_logvar = self.prior(pooled.detach()).chunk(2, dim=-1)
+        prior_mean = torch.zeros_like(latent_mean)
+        prior_logvar = torch.zeros_like(latent_logvar)
 
         latent_logvar = latent_logvar.clamp(-10.0, 5.0)
-        prior_logvar = prior_logvar.clamp(-10.0, 5.0)
         if self.training:
             eps = torch.randn_like(latent_mean)
             z = latent_mean + eps * torch.exp(0.5 * latent_logvar)
@@ -331,7 +328,7 @@ def training_objective(
     output: BVTOutput,
     target_values: Tensor,
     target_mask: Optional[Tensor],
-    target_is_noisy: bool = True,
+    target_is_noisy: bool = False,
     beta_kl: float = 1e-3,
     beta_noise_prior: float = 1e-4,
     target_weight: Optional[Tensor] = None,
@@ -360,6 +357,115 @@ def training_objective(
     metrics = {
         "loss": loss.detach(),
         "nll": nll.detach(),
+        "kl": kl.detach(),
+        "noise_prior": noise_prior.detach(),
+    }
+    return loss, metrics
+
+
+def radial_frequency_weights(
+    coords: Tensor,
+    token_mask: Optional[Tensor],
+    alpha: float = 2.0,
+    gamma: float = 1.0,
+) -> Tensor:
+    """Weight outer uv radius more strongly for super-resolution learning."""
+    rho = torch.linalg.norm(coords[..., :2], dim=-1)
+    if token_mask is None:
+        rho_max = rho.amax(dim=1, keepdim=True)
+    else:
+        masked_rho = rho.masked_fill(~token_mask.bool(), 0.0)
+        rho_max = masked_rho.amax(dim=1, keepdim=True)
+    rho_norm = rho / rho_max.clamp_min(1e-6)
+    return 1.0 + alpha * rho_norm.pow(gamma)
+
+
+def hermitian_symmetry_loss(
+    pred_values: Tensor,
+    coords: Tensor,
+    token_mask: Optional[Tensor],
+    tolerance: float = 1e-4,
+) -> Tensor:
+    """Penalize violations of V(-u, -v) = conj(V(u, v))."""
+    losses = []
+    batch_size = pred_values.shape[0]
+    for batch_idx in range(batch_size):
+        if token_mask is None:
+            valid = torch.ones(pred_values.shape[1], device=pred_values.device, dtype=torch.bool)
+        else:
+            valid = token_mask[batch_idx].bool()
+        if valid.sum() < 2:
+            continue
+
+        uv = coords[batch_idx, valid, :2]
+        pred = pred_values[batch_idx, valid]
+        distance = torch.cdist(uv, -uv)
+        min_distance, pair_index = distance.min(dim=1)
+        pair_mask = min_distance <= tolerance
+        if pair_mask.sum() == 0:
+            continue
+
+        pred_pair = pred[pair_index[pair_mask]]
+        pred_conj = torch.stack([pred[pair_mask, 0], -pred[pair_mask, 1]], dim=-1)
+        losses.append((pred_pair - pred_conj).abs().sum(dim=-1).mean())
+
+    if not losses:
+        return pred_values.new_zeros(())
+    return torch.stack(losses).mean()
+
+
+def visibility_physical_objective(
+    output: BVTOutput,
+    batch: VisibilityRegionInput,
+    target_is_noisy: bool = False,
+    beta_kl: float = 1e-3,
+    beta_noise_prior: float = 1e-4,
+    lambda_orig: float = 1.0,
+    lambda_virtual: float = 2.0,
+    lambda_expanded: float = 3.0,
+    lambda_high_freq: float = 1.0,
+    lambda_sym: float = 0.1,
+    freq_alpha: float = 2.0,
+    freq_gamma: float = 1.0,
+    symmetry_tolerance: float = 1e-4,
+) -> tuple[Tensor, dict[str, Tensor]]:
+    """Region-separated physical objective for visibility denoising and SR."""
+    likelihood_logvar = output.total_logvar if target_is_noisy else output.clean_logvar
+    expanded_mask = batch.virtual_mask & ~batch.original_mask
+    freq_weights = radial_frequency_weights(batch.coords, batch.token_mask, freq_alpha, freq_gamma)
+
+    nll_orig = gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, batch.original_mask)
+    nll_virtual = gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, batch.virtual_mask)
+    nll_expanded = gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, expanded_mask)
+    nll_high_freq = gaussian_nll(
+        batch.target_values,
+        output.clean_mean,
+        likelihood_logvar,
+        batch.target_mask,
+        weight=freq_weights,
+    )
+
+    kl = kl_normal(output.latent_mean, output.latent_logvar, output.prior_mean, output.prior_logvar)
+    mask = batch.target_mask.to(output.noise_logvar.dtype).unsqueeze(-1)
+    denom = (mask.sum() * output.noise_logvar.shape[-1]).clamp_min(1.0)
+    noise_prior = (torch.exp(output.noise_logvar) * mask).sum() / denom
+    sym = hermitian_symmetry_loss(output.clean_mean, batch.coords, batch.token_mask, symmetry_tolerance)
+
+    region_nll = (
+        lambda_orig * nll_orig
+        + lambda_virtual * nll_virtual
+        + lambda_expanded * nll_expanded
+        + lambda_high_freq * nll_high_freq
+    )
+    loss = region_nll + lambda_sym * sym + beta_kl * kl + beta_noise_prior * noise_prior
+    metrics = {
+        "loss": loss.detach(),
+        "region_nll": region_nll.detach(),
+        "nll_original": nll_orig.detach(),
+        "nll_virtual": nll_virtual.detach(),
+        "nll_expanded_only": nll_expanded.detach(),
+        "nll_high_freq": nll_high_freq.detach(),
+        "hermitian": sym.detach(),
         "kl": kl.detach(),
         "noise_prior": noise_prior.detach(),
     }

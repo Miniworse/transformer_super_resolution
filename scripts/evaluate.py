@@ -26,7 +26,7 @@ from train import (  # noqa: E402
 from visibility_transformer import (  # noqa: E402
     BayesianVisibilityTransformer,
     SRVisibilityDataset,
-    training_objective,
+    visibility_physical_objective,
     visibility_collate_fn,
 )
 
@@ -70,6 +70,18 @@ def main() -> None:
     target_suffix = args.target_suffix if args.target_suffix is not None else ckpt_args.get("target_suffix")
     expand_ids = parse_int_list(args.expand_ids or ckpt_args.get("expand_ids", "0,1,2,3,4"))
     target_is_noisy = args.target_is_noisy or bool(ckpt_args.get("target_is_noisy", False))
+    objective_kwargs = {
+        "beta_kl": float(ckpt_args.get("beta_kl", 1e-3)),
+        "beta_noise_prior": float(ckpt_args.get("beta_noise_prior", 1e-4)),
+        "lambda_orig": float(ckpt_args.get("lambda_orig", 1.0)),
+        "lambda_virtual": float(ckpt_args.get("lambda_virtual", 2.0)),
+        "lambda_expanded": float(ckpt_args.get("lambda_expanded", 3.0)),
+        "lambda_high_freq": float(ckpt_args.get("lambda_high_freq", 1.0)),
+        "lambda_sym": float(ckpt_args.get("lambda_sym", 0.1)),
+        "freq_alpha": float(ckpt_args.get("freq_alpha", 2.0)),
+        "freq_gamma": float(ckpt_args.get("freq_gamma", 1.0)),
+        "symmetry_tolerance": float(ckpt_args.get("symmetry_tolerance", 1e-4)),
+    }
     include_virtual_context = (
         bool(ckpt_args.get("include_virtual_context", False))
         if args.include_virtual_context is None
@@ -116,11 +128,11 @@ def main() -> None:
         for batch in loader:
             batch = move_batch(batch, device)
             out = model(batch.values, batch.coords, batch.known_mask, batch.redundancy, batch.token_mask)
-            loss, loss_metrics = training_objective(
+            loss, loss_metrics = visibility_physical_objective(
                 out,
-                batch.target_values,
-                batch.target_mask,
+                batch,
                 target_is_noisy=target_is_noisy,
+                **objective_kwargs,
             )
             item = {key: float(value.cpu()) for key, value in loss_metrics.items()}
             item["loss"] = float(loss.cpu())

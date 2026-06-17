@@ -29,8 +29,11 @@ redundant[:, 0]                    -> original-array redundancy
 redundant[:, 1]                    -> introduced virtual-array redundancy
 ```
 
-`redundant[:, 0] > 0` marks original known visibility used as model context.
-`redundant[:, 1] > 0` marks the expanded virtual region used as target support.
+`redundant[:, 0] > 0` marks original known visibility. `redundant[:, 1] > 0`
+marks the expanded virtual region used as target support.
+
+By default, the model uses only original known visibility as context. You can
+allow virtual visibility as context with `--include-virtual-context`.
 
 ## Install
 
@@ -42,7 +45,8 @@ pip install -r requirements.txt
 
 ## Train On Current Unnoised Data
 
-This trains scene `0001-0080`, validates on `0081-0090`, and uses expand levels `0-4`.
+This trains scene `0001-0080`, validates on `0081-0090`, and uses expand levels
+`0-4`.
 
 ```powershell
 python scripts/train.py `
@@ -70,6 +74,9 @@ python scripts/train.py `
   --expand-ids 0,1,2,3,4 `
   --run-dir runs/bvt_noised_1
 ```
+
+This is the recommended denoising setup. The default objective treats the target
+as clean, so `clean_mean` is trained directly toward `visibility_*_unnoised.npy`.
 
 If you intentionally train with noisy targets only, omit `--target-suffix` and add:
 
@@ -119,10 +126,36 @@ Training also logs:
 
 ```text
 loss
-nll
+region_nll
+nll_original
+nll_virtual
+nll_expanded_only
+nll_high_freq
+hermitian
 kl
 noise_prior
 ```
 
-TensorBoard includes scalar curves and uv scatter figures showing target amplitude,
-predicted amplitude, and visibility error amplitude.
+TensorBoard includes scalar curves and uv scatter figures showing target
+amplitude, predicted amplitude, and visibility error amplitude.
+
+## Physical Loss Defaults
+
+The training script uses region-separated losses:
+
+```text
+lambda_orig = 1.0
+lambda_virtual = 2.0
+lambda_expanded = 3.0
+lambda_high_freq = 1.0
+lambda_sym = 0.1
+freq_alpha = 2.0
+freq_gamma = 1.0
+```
+
+These defaults put extra pressure on expanded-only uv tokens and outer-radius uv
+coordinates, while also regularizing Hermitian symmetry:
+
+```text
+V(-u, -v) = conj(V(u, v))
+```
