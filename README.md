@@ -102,6 +102,37 @@ runs/bvt_v1/eval/metrics.json
 runs/bvt_v1/eval/tensorboard
 ```
 
+## Visualize One Test Scene
+
+Create a compact comparison of matched uv visibility and image-domain views:
+
+```powershell
+python scripts/visualize_test.py `
+  --checkpoint runs/bvt_v1/checkpoints/best.pt `
+  --scene-id 91 `
+  --expand-id 4
+```
+
+The figure contains:
+
+```text
+uv panels: original input |V|, predicted clean |V|, ideal target |V|, |error|
+image panels: original-input image, predicted-expanded image, ideal-expanded image, image error
+```
+
+The image panels are only for visualization. They use a direct irregular inverse
+Fourier sum on:
+
+```text
+xi = eta = linspace(-sin(4 deg), sin(4 deg), 256)
+```
+
+Outputs are written by default to:
+
+```text
+runs/bvt_v1/visualizations/
+```
+
 ## Metrics
 
 The scripts log these metrics for four regions:
