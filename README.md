@@ -6,18 +6,19 @@ First-version transformer for visibility-region denoising and uv super-resolutio
 
 ```text
 .
-├── README.md
-├── requirements.txt
-├── scripts
-│   ├── evaluate.py
-│   └── train.py
-├── src
-│   └── visibility_transformer
-│       ├── __init__.py
-│       └── model.py
-└── srdata
-    └── srdata16Juin
-        └── interval5_AMtown01
++-- README.md
++-- requirements.txt
++-- scripts
+|   +-- evaluate.py
+|   +-- train.py
+|   +-- visualize_test.py
++-- src
+|   +-- visibility_transformer
+|       +-- __init__.py
+|       +-- model.py
++-- srdata
+    +-- srdata16Juin
+        +-- interval5_AMtown01
 ```
 
 The data arrays are expected as `[V, 2]`:
@@ -162,6 +163,7 @@ nll_original
 nll_virtual
 nll_expanded_only
 nll_high_freq
+nll_radial_bins
 hermitian
 kl
 noise_prior
@@ -177,11 +179,13 @@ The training script uses region-separated losses:
 ```text
 lambda_orig = 1.0
 lambda_virtual = 2.0
-lambda_expanded = 3.0
-lambda_high_freq = 1.0
+lambda_expanded = 5.0
+lambda_high_freq = 3.0
+lambda_radial_bins = 2.0
 lambda_sym = 0.1
-freq_alpha = 2.0
-freq_gamma = 1.0
+freq_alpha = 6.0
+freq_gamma = 2.0
+num_radial_bins = 8
 ```
 
 These defaults put extra pressure on expanded-only uv tokens and outer-radius uv
@@ -190,3 +194,7 @@ coordinates, while also regularizing Hermitian symmetry:
 ```text
 V(-u, -v) = conj(V(u, v))
 ```
+
+The radial-bin term balances the expanded-only uv region by radius band, so each
+occupied band contributes comparable loss even when low-frequency points have
+larger amplitude or are easier to fit.

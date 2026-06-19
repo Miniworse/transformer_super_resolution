@@ -380,6 +380,35 @@ def radial_frequency_weights(
     return 1.0 + alpha * rho_norm.pow(gamma)
 
 
+def radial_bin_balanced_weights(
+    coords: Tensor,
+    balance_mask: Tensor,
+    num_bins: int = 8,
+) -> Tensor:
+    """Give each occupied uv-radius bin equal total weight."""
+    if num_bins <= 0:
+        raise ValueError("num_bins must be positive.")
+
+    rho = torch.linalg.norm(coords[..., :2], dim=-1)
+    weights = torch.zeros_like(rho)
+    for batch_idx in range(coords.shape[0]):
+        valid = balance_mask[batch_idx].bool()
+        if valid.sum() == 0:
+            continue
+
+        rho_valid = rho[batch_idx, valid]
+        rho_norm = rho_valid / rho_valid.max().clamp_min(1e-6)
+        bin_index = torch.clamp((rho_norm * num_bins).long(), max=num_bins - 1)
+        occupied = torch.unique(bin_index)
+        valid_count = valid.sum().to(rho.dtype)
+        for bin_id in occupied:
+            in_bin = bin_index == bin_id
+            bin_weight = valid_count / (occupied.numel() * in_bin.sum().clamp_min(1).to(rho.dtype))
+            valid_positions = torch.where(valid)[0][in_bin]
+            weights[batch_idx, valid_positions] = bin_weight
+    return weights
+
+
 def hermitian_symmetry_loss(
     pred_values: Tensor,
     coords: Tensor,
@@ -422,17 +451,20 @@ def visibility_physical_objective(
     beta_noise_prior: float = 1e-4,
     lambda_orig: float = 1.0,
     lambda_virtual: float = 2.0,
-    lambda_expanded: float = 3.0,
-    lambda_high_freq: float = 1.0,
+    lambda_expanded: float = 5.0,
+    lambda_high_freq: float = 3.0,
+    lambda_radial_bins: float = 2.0,
     lambda_sym: float = 0.1,
-    freq_alpha: float = 2.0,
-    freq_gamma: float = 1.0,
+    freq_alpha: float = 6.0,
+    freq_gamma: float = 2.0,
+    num_radial_bins: int = 8,
     symmetry_tolerance: float = 1e-4,
 ) -> tuple[Tensor, dict[str, Tensor]]:
     """Region-separated physical objective for visibility denoising and SR."""
     likelihood_logvar = output.total_logvar if target_is_noisy else output.clean_logvar
     expanded_mask = batch.virtual_mask & ~batch.original_mask
     freq_weights = radial_frequency_weights(batch.coords, batch.token_mask, freq_alpha, freq_gamma)
+    radial_bin_weights = radial_bin_balanced_weights(batch.coords, expanded_mask, num_radial_bins)
 
     nll_orig = gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, batch.original_mask)
     nll_virtual = gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, batch.virtual_mask)
@@ -441,8 +473,15 @@ def visibility_physical_objective(
         batch.target_values,
         output.clean_mean,
         likelihood_logvar,
-        batch.target_mask,
+        expanded_mask,
         weight=freq_weights,
+    )
+    nll_radial_bins = gaussian_nll(
+        batch.target_values,
+        output.clean_mean,
+        likelihood_logvar,
+        expanded_mask,
+        weight=radial_bin_weights,
     )
 
     kl = kl_normal(output.latent_mean, output.latent_logvar, output.prior_mean, output.prior_logvar)
@@ -456,6 +495,7 @@ def visibility_physical_objective(
         + lambda_virtual * nll_virtual
         + lambda_expanded * nll_expanded
         + lambda_high_freq * nll_high_freq
+        + lambda_radial_bins * nll_radial_bins
     )
     loss = region_nll + lambda_sym * sym + beta_kl * kl + beta_noise_prior * noise_prior
     metrics = {
@@ -465,6 +505,7 @@ def visibility_physical_objective(
         "nll_virtual": nll_virtual.detach(),
         "nll_expanded_only": nll_expanded.detach(),
         "nll_high_freq": nll_high_freq.detach(),
+        "nll_radial_bins": nll_radial_bins.detach(),
         "hermitian": sym.detach(),
         "kl": kl.detach(),
         "noise_prior": noise_prior.detach(),

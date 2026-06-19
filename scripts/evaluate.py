@@ -75,11 +75,13 @@ def main() -> None:
         "beta_noise_prior": float(ckpt_args.get("beta_noise_prior", 1e-4)),
         "lambda_orig": float(ckpt_args.get("lambda_orig", 1.0)),
         "lambda_virtual": float(ckpt_args.get("lambda_virtual", 2.0)),
-        "lambda_expanded": float(ckpt_args.get("lambda_expanded", 3.0)),
-        "lambda_high_freq": float(ckpt_args.get("lambda_high_freq", 1.0)),
+        "lambda_expanded": float(ckpt_args.get("lambda_expanded", 5.0)),
+        "lambda_high_freq": float(ckpt_args.get("lambda_high_freq", 3.0)),
+        "lambda_radial_bins": float(ckpt_args.get("lambda_radial_bins", 2.0)),
         "lambda_sym": float(ckpt_args.get("lambda_sym", 0.1)),
-        "freq_alpha": float(ckpt_args.get("freq_alpha", 2.0)),
-        "freq_gamma": float(ckpt_args.get("freq_gamma", 1.0)),
+        "freq_alpha": float(ckpt_args.get("freq_alpha", 6.0)),
+        "freq_gamma": float(ckpt_args.get("freq_gamma", 2.0)),
+        "num_radial_bins": int(ckpt_args.get("num_radial_bins", 8)),
         "symmetry_tolerance": float(ckpt_args.get("symmetry_tolerance", 1e-4)),
     }
     include_virtual_context = (
