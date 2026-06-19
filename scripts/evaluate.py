@@ -24,6 +24,7 @@ from train import (  # noqa: E402
     parse_int_list,
 )
 from visibility_transformer import (  # noqa: E402
+    BayesianVisibilityEncoderDecoder,
     BayesianVisibilityTransformer,
     SRVisibilityDataset,
     visibility_physical_objective,
@@ -42,6 +43,27 @@ def load_checkpoint(path: Path) -> dict:
             stacklevel=2,
         )
         return torch.load(path, map_location="cpu", weights_only=False)
+
+
+def create_model_from_args(ckpt_args: dict):
+    common = {
+        "coord_dim": 2,
+        "redundancy_dim": 2,
+        "model_dim": int(ckpt_args.get("model_dim", 256)),
+        "latent_dim": int(ckpt_args.get("latent_dim", 64)),
+        "num_heads": int(ckpt_args.get("num_heads", 8)),
+        "num_frequencies": int(ckpt_args.get("num_frequencies", 16)),
+        "normalize_coords": bool(ckpt_args.get("normalize_coords", False)),
+        "dropout": float(ckpt_args.get("dropout", 0.1)),
+    }
+    architecture = ckpt_args.get("architecture", "encoder")
+    if architecture == "encoder-decoder":
+        return BayesianVisibilityEncoderDecoder(
+            num_encoder_layers=int(ckpt_args.get("num_encoder_layers", 6)),
+            num_decoder_layers=int(ckpt_args.get("num_decoder_layers", 4)),
+            **common,
+        )
+    return BayesianVisibilityTransformer(num_layers=int(ckpt_args.get("num_layers", 8)), **common)
 
 
 def main() -> None:
@@ -75,12 +97,12 @@ def main() -> None:
         "beta_noise_prior": float(ckpt_args.get("beta_noise_prior", 1e-4)),
         "lambda_orig": float(ckpt_args.get("lambda_orig", 1.0)),
         "lambda_virtual": float(ckpt_args.get("lambda_virtual", 2.0)),
-        "lambda_expanded": float(ckpt_args.get("lambda_expanded", 5.0)),
-        "lambda_high_freq": float(ckpt_args.get("lambda_high_freq", 3.0)),
-        "lambda_radial_bins": float(ckpt_args.get("lambda_radial_bins", 2.0)),
+        "lambda_expanded": float(ckpt_args.get("lambda_expanded", 3.0)),
+        "lambda_high_freq": float(ckpt_args.get("lambda_high_freq", 1.0)),
+        "lambda_radial_bins": float(ckpt_args.get("lambda_radial_bins", 0.0)),
         "lambda_sym": float(ckpt_args.get("lambda_sym", 0.1)),
-        "freq_alpha": float(ckpt_args.get("freq_alpha", 6.0)),
-        "freq_gamma": float(ckpt_args.get("freq_gamma", 2.0)),
+        "freq_alpha": float(ckpt_args.get("freq_alpha", 2.0)),
+        "freq_gamma": float(ckpt_args.get("freq_gamma", 1.0)),
         "num_radial_bins": int(ckpt_args.get("num_radial_bins", 8)),
         "symmetry_tolerance": float(ckpt_args.get("symmetry_tolerance", 1e-4)),
     }
@@ -106,17 +128,7 @@ def main() -> None:
         collate_fn=visibility_collate_fn,
     )
 
-    model = BayesianVisibilityTransformer(
-        coord_dim=2,
-        redundancy_dim=2,
-        model_dim=int(ckpt_args.get("model_dim", 256)),
-        latent_dim=int(ckpt_args.get("latent_dim", 64)),
-        num_layers=int(ckpt_args.get("num_layers", 8)),
-        num_heads=int(ckpt_args.get("num_heads", 8)),
-        num_frequencies=int(ckpt_args.get("num_frequencies", 16)),
-        normalize_coords=bool(ckpt_args.get("normalize_coords", False)),
-        dropout=float(ckpt_args.get("dropout", 0.1)),
-    )
+    model = create_model_from_args(ckpt_args)
     model.load_state_dict(checkpoint["model"])
     device = torch.device(args.device)
     model.to(device)

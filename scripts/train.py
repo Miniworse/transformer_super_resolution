@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from visibility_transformer import (  # noqa: E402
+    BayesianVisibilityEncoderDecoder,
     BayesianVisibilityTransformer,
     SRVisibilityDataset,
     VisibilityRegionInput,
@@ -71,8 +72,7 @@ def region_metrics(pred: Tensor, target: Tensor, mask: Tensor, prefix: str) -> d
         f"{prefix}/mse": float(mse.detach().cpu()),
         f"{prefix}/rmse": float(torch.sqrt(mse).detach().cpu()),
         f"{prefix}/mae": float(mae.detach().cpu()),
-        f"{prefix}/nm"
-        f"se_db": float((10.0 * torch.log10(nmse)).detach().cpu()),
+        f"{prefix}/nmse_db": float((10.0 * torch.log10(nmse)).detach().cpu()),
     }
 
 
@@ -111,6 +111,28 @@ def serializable_args(args: argparse.Namespace) -> dict[str, object]:
     for key, value in vars(args).items():
         result[key] = str(value) if isinstance(value, Path) else value
     return result
+
+
+def create_model(args: argparse.Namespace):
+    common = {
+        "coord_dim": 2,
+        "redundancy_dim": 2,
+        "model_dim": args.model_dim,
+        "latent_dim": args.latent_dim,
+        "num_heads": args.num_heads,
+        "num_frequencies": args.num_frequencies,
+        "normalize_coords": args.normalize_coords,
+        "dropout": args.dropout,
+    }
+    if args.architecture == "encoder":
+        return BayesianVisibilityTransformer(num_layers=args.num_layers, **common)
+    if args.architecture == "encoder-decoder":
+        return BayesianVisibilityEncoderDecoder(
+            num_encoder_layers=args.num_encoder_layers,
+            num_decoder_layers=args.num_decoder_layers,
+            **common,
+        )
+    raise ValueError(f"Unsupported architecture: {args.architecture}")
 
 
 def make_uv_figure(batch: VisibilityRegionInput, pred: Tensor, max_points: int = 2500):
@@ -194,17 +216,20 @@ def main() -> None:
     parser.add_argument("--beta-noise-prior", type=float, default=1e-4)
     parser.add_argument("--lambda-orig", type=float, default=1.0)
     parser.add_argument("--lambda-virtual", type=float, default=2.0)
-    parser.add_argument("--lambda-expanded", type=float, default=5.0)
-    parser.add_argument("--lambda-high-freq", type=float, default=3.0)
-    parser.add_argument("--lambda-radial-bins", type=float, default=2.0)
+    parser.add_argument("--lambda-expanded", type=float, default=3.0)
+    parser.add_argument("--lambda-high-freq", type=float, default=1.0)
+    parser.add_argument("--lambda-radial-bins", type=float, default=0.0)
     parser.add_argument("--lambda-sym", type=float, default=0.1)
-    parser.add_argument("--freq-alpha", type=float, default=6.0)
-    parser.add_argument("--freq-gamma", type=float, default=2.0)
+    parser.add_argument("--freq-alpha", type=float, default=2.0)
+    parser.add_argument("--freq-gamma", type=float, default=1.0)
     parser.add_argument("--num-radial-bins", type=int, default=8)
     parser.add_argument("--symmetry-tolerance", type=float, default=1e-4)
+    parser.add_argument("--architecture", choices=["encoder", "encoder-decoder"], default="encoder-decoder")
     parser.add_argument("--model-dim", type=int, default=256)
     parser.add_argument("--latent-dim", type=int, default=64)
     parser.add_argument("--num-layers", type=int, default=8)
+    parser.add_argument("--num-encoder-layers", type=int, default=6)
+    parser.add_argument("--num-decoder-layers", type=int, default=4)
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--num-frequencies", type=int, default=16)
     parser.add_argument("--normalize-coords", action=argparse.BooleanOptionalAction, default=True)
@@ -255,17 +280,7 @@ def main() -> None:
     )
 
     device = torch.device(args.device)
-    model = BayesianVisibilityTransformer(
-        coord_dim=2,
-        redundancy_dim=2,
-        model_dim=args.model_dim,
-        latent_dim=args.latent_dim,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        num_frequencies=args.num_frequencies,
-        normalize_coords=args.normalize_coords,
-        dropout=args.dropout,
-    ).to(device)
+    model = create_model(args).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     writer = SummaryWriter(args.run_dir / "tensorboard")

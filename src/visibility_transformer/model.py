@@ -324,6 +324,124 @@ class BayesianVisibilityTransformer(nn.Module):
         )
 
 
+class BayesianVisibilityEncoderDecoder(nn.Module):
+    """Observed-visibility encoder with expanded-uv query decoder.
+
+    The encoder only receives observed/original visibility evidence. The decoder
+    predicts clean visibility at every valid uv token as a query. This keeps the
+    information path physically clearer:
+
+        observed noisy visibility -> encoder memory -> uv query decoder
+    """
+
+    def __init__(
+        self,
+        coord_dim: int = 2,
+        redundancy_dim: int = 2,
+        model_dim: int = 256,
+        latent_dim: int = 64,
+        num_encoder_layers: int = 6,
+        num_decoder_layers: int = 4,
+        num_heads: int = 8,
+        num_frequencies: int = 16,
+        max_frequency: float = 64.0,
+        normalize_coords: bool = False,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.context_embed = VisibilityTokenEmbedder(
+            coord_dim=coord_dim,
+            model_dim=model_dim,
+            redundancy_dim=redundancy_dim,
+            num_frequencies=num_frequencies,
+            max_frequency=max_frequency,
+            normalize_coords=normalize_coords,
+            dropout=dropout,
+        )
+        self.query_embed = VisibilityTokenEmbedder(
+            coord_dim=coord_dim,
+            model_dim=model_dim,
+            redundancy_dim=redundancy_dim,
+            num_frequencies=num_frequencies,
+            max_frequency=max_frequency,
+            normalize_coords=normalize_coords,
+            dropout=dropout,
+        )
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=model_dim,
+            nhead=num_heads,
+            dim_feedforward=4 * model_dim,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_encoder_layers)
+
+        dec_layer = nn.TransformerDecoderLayer(
+            d_model=model_dim,
+            nhead=num_heads,
+            dim_feedforward=4 * model_dim,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(dec_layer, num_layers=num_decoder_layers)
+        self.latent = LatentNoiseState(model_dim, latent_dim)
+
+        self.head = nn.Sequential(
+            nn.LayerNorm(model_dim),
+            nn.Linear(model_dim, model_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(model_dim, 6),
+        )
+
+    def forward(
+        self,
+        values: Tensor,
+        coords: Tensor,
+        known_mask: Tensor,
+        redundancy: Tensor,
+        token_mask: Optional[Tensor] = None,
+    ) -> BVTOutput:
+        if token_mask is None:
+            token_mask = torch.ones(values.shape[:2], device=values.device, dtype=torch.bool)
+
+        context_mask = token_mask.bool() & known_mask.bool()
+        context_values = values.masked_fill(~context_mask.unsqueeze(-1), 0.0)
+        context_tokens = self.context_embed(context_values, coords, context_mask, redundancy)
+        memory_key_padding_mask = ~context_mask
+        memory = self.encoder(context_tokens, src_key_padding_mask=memory_key_padding_mask)
+
+        z_token, latent_mean, latent_logvar, prior_mean, prior_logvar = self.latent(memory, context_mask)
+        memory = memory + z_token.unsqueeze(1)
+
+        query_values = torch.zeros_like(values)
+        query_tokens = self.query_embed(query_values, coords, known_mask.bool(), redundancy)
+        decoded = self.decoder(
+            query_tokens,
+            memory,
+            tgt_key_padding_mask=~token_mask.bool(),
+            memory_key_padding_mask=memory_key_padding_mask,
+        )
+
+        pred = self.head(decoded)
+        clean_mean = pred[..., :2]
+        clean_logvar = pred[..., 2:4].clamp(-12.0, 6.0)
+        noise_logvar = pred[..., 4:6].clamp(-12.0, 6.0)
+
+        return BVTOutput(
+            clean_mean=clean_mean,
+            clean_logvar=clean_logvar,
+            noise_logvar=noise_logvar,
+            latent_mean=latent_mean,
+            latent_logvar=latent_logvar,
+            prior_mean=prior_mean,
+            prior_logvar=prior_logvar,
+        )
+
+
 def training_objective(
     output: BVTOutput,
     target_values: Tensor,
@@ -451,12 +569,12 @@ def visibility_physical_objective(
     beta_noise_prior: float = 1e-4,
     lambda_orig: float = 1.0,
     lambda_virtual: float = 2.0,
-    lambda_expanded: float = 5.0,
-    lambda_high_freq: float = 3.0,
-    lambda_radial_bins: float = 2.0,
+    lambda_expanded: float = 3.0,
+    lambda_high_freq: float = 1.0,
+    lambda_radial_bins: float = 0.0,
     lambda_sym: float = 0.1,
-    freq_alpha: float = 6.0,
-    freq_gamma: float = 2.0,
+    freq_alpha: float = 2.0,
+    freq_gamma: float = 1.0,
     num_radial_bins: int = 8,
     symmetry_tolerance: float = 1e-4,
 ) -> tuple[Tensor, dict[str, Tensor]]:

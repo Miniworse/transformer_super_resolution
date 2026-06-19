@@ -2,6 +2,7 @@
 
 from .model import (
     BVTOutput,
+    BayesianVisibilityEncoderDecoder,
     BayesianVisibilityTransformer,
     SRVisibilityDataset,
     VisibilityRegionInput,
@@ -21,6 +22,7 @@ from .model import (
 
 __all__ = [
     "BVTOutput",
+    "BayesianVisibilityEncoderDecoder",
     "BayesianVisibilityTransformer",
     "SRVisibilityDataset",
     "VisibilityRegionInput",

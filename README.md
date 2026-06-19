@@ -36,6 +36,14 @@ marks the expanded virtual region used as target support.
 By default, the model uses only original known visibility as context. You can
 allow virtual visibility as context with `--include-virtual-context`.
 
+Training now defaults to the encoder-decoder architecture:
+
+```text
+observed visibility encoder -> expanded uv query decoder -> predicted visibility
+```
+
+Use `--architecture encoder` to run the older single-encoder baseline.
+
 ## Install
 
 Install PyTorch for your CUDA/CPU environment first, then:
@@ -179,22 +187,21 @@ The training script uses region-separated losses:
 ```text
 lambda_orig = 1.0
 lambda_virtual = 2.0
-lambda_expanded = 5.0
-lambda_high_freq = 3.0
-lambda_radial_bins = 2.0
+lambda_expanded = 3.0
+lambda_high_freq = 1.0
+lambda_radial_bins = 0.0
 lambda_sym = 0.1
-freq_alpha = 6.0
-freq_gamma = 2.0
+freq_alpha = 2.0
+freq_gamma = 1.0
 num_radial_bins = 8
 ```
 
-These defaults put extra pressure on expanded-only uv tokens and outer-radius uv
-coordinates, while also regularizing Hermitian symmetry:
+These defaults restore the gentler former weighting while keeping Hermitian
+symmetry regularization:
 
 ```text
 V(-u, -v) = conj(V(u, v))
 ```
 
-The radial-bin term balances the expanded-only uv region by radius band, so each
-occupied band contributes comparable loss even when low-frequency points have
-larger amplitude or are easier to fit.
+The radial-bin term is still available with `--lambda-radial-bins`, but it is
+disabled by default because it was too aggressive in the latest run.

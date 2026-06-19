@@ -20,6 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from train import compute_metrics, move_batch  # noqa: E402
 from visibility_transformer import (  # noqa: E402
+    BayesianVisibilityEncoderDecoder,
     BayesianVisibilityTransformer,
     build_visibility_region_inputs,
     load_srdata_arrays,
@@ -36,6 +37,27 @@ def load_checkpoint(path: Path) -> dict:
             stacklevel=2,
         )
         return torch.load(path, map_location="cpu", weights_only=False)
+
+
+def create_model_from_args(ckpt_args: dict):
+    common = {
+        "coord_dim": 2,
+        "redundancy_dim": 2,
+        "model_dim": int(ckpt_args.get("model_dim", 256)),
+        "latent_dim": int(ckpt_args.get("latent_dim", 64)),
+        "num_heads": int(ckpt_args.get("num_heads", 8)),
+        "num_frequencies": int(ckpt_args.get("num_frequencies", 16)),
+        "normalize_coords": bool(ckpt_args.get("normalize_coords", False)),
+        "dropout": float(ckpt_args.get("dropout", 0.1)),
+    }
+    architecture = ckpt_args.get("architecture", "encoder")
+    if architecture == "encoder-decoder":
+        return BayesianVisibilityEncoderDecoder(
+            num_encoder_layers=int(ckpt_args.get("num_encoder_layers", 6)),
+            num_decoder_layers=int(ckpt_args.get("num_decoder_layers", 4)),
+            **common,
+        )
+    return BayesianVisibilityTransformer(num_layers=int(ckpt_args.get("num_layers", 8)), **common)
 
 
 def complex_from_ri(values: Tensor) -> np.ndarray:
@@ -258,17 +280,7 @@ def main() -> None:
         include_virtual_context=include_virtual_context,
     )
 
-    model = BayesianVisibilityTransformer(
-        coord_dim=2,
-        redundancy_dim=2,
-        model_dim=int(ckpt_args.get("model_dim", 256)),
-        latent_dim=int(ckpt_args.get("latent_dim", 64)),
-        num_layers=int(ckpt_args.get("num_layers", 8)),
-        num_heads=int(ckpt_args.get("num_heads", 8)),
-        num_frequencies=int(ckpt_args.get("num_frequencies", 16)),
-        normalize_coords=bool(ckpt_args.get("normalize_coords", False)),
-        dropout=float(ckpt_args.get("dropout", 0.1)),
-    )
+    model = create_model_from_args(ckpt_args)
     model.load_state_dict(checkpoint["model"])
     device = torch.device(args.device)
     model.to(device)
