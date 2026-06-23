@@ -417,7 +417,7 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         z_token, latent_mean, latent_logvar, prior_mean, prior_logvar = self.latent(memory, context_mask)
         memory = memory + z_token.unsqueeze(1)
 
-        query_values = torch.zeros_like(values)
+        query_values = values.masked_fill(~known_mask.bool().unsqueeze(-1), 0.0)
         query_tokens = self.query_embed(query_values, coords, known_mask.bool(), redundancy)
         decoded = self.decoder(
             query_tokens,
@@ -427,7 +427,12 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         )
 
         pred = self.head(decoded)
-        clean_mean = pred[..., :2]
+        delta_or_value = pred[..., :2]
+        clean_mean = torch.where(
+            known_mask.bool().unsqueeze(-1),
+            values + delta_or_value,
+            delta_or_value,
+        )
         clean_logvar = pred[..., 2:4].clamp(-12.0, 6.0)
         noise_logvar = pred[..., 4:6].clamp(-12.0, 6.0)
 
@@ -561,6 +566,16 @@ def hermitian_symmetry_loss(
     return torch.stack(losses).mean()
 
 
+def complex_energy_loss(pred_values: Tensor, target_values: Tensor, mask: Tensor) -> Tensor:
+    """Match total complex visibility energy in a masked region."""
+    if mask.sum() == 0:
+        return pred_values.new_zeros(())
+    weights = mask.unsqueeze(-1).to(pred_values.dtype)
+    pred_energy = ((pred_values.pow(2)) * weights).sum().sqrt()
+    target_energy = ((target_values.pow(2)) * weights).sum().sqrt().clamp_min(1e-8)
+    return (pred_energy / target_energy - 1.0).abs()
+
+
 def visibility_physical_objective(
     output: BVTOutput,
     batch: VisibilityRegionInput,
@@ -573,6 +588,8 @@ def visibility_physical_objective(
     lambda_high_freq: float = 1.0,
     lambda_radial_bins: float = 0.0,
     lambda_sym: float = 0.1,
+    lambda_energy_orig: float = 0.5,
+    lambda_energy_virtual: float = 0.5,
     freq_alpha: float = 2.0,
     freq_gamma: float = 1.0,
     num_radial_bins: int = 8,
@@ -607,6 +624,8 @@ def visibility_physical_objective(
     denom = (mask.sum() * output.noise_logvar.shape[-1]).clamp_min(1.0)
     noise_prior = (torch.exp(output.noise_logvar) * mask).sum() / denom
     sym = hermitian_symmetry_loss(output.clean_mean, batch.coords, batch.token_mask, symmetry_tolerance)
+    energy_orig = complex_energy_loss(output.clean_mean, batch.target_values, batch.original_mask)
+    energy_virtual = complex_energy_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
 
     region_nll = (
         lambda_orig * nll_orig
@@ -615,7 +634,8 @@ def visibility_physical_objective(
         + lambda_high_freq * nll_high_freq
         + lambda_radial_bins * nll_radial_bins
     )
-    loss = region_nll + lambda_sym * sym + beta_kl * kl + beta_noise_prior * noise_prior
+    energy = lambda_energy_orig * energy_orig + lambda_energy_virtual * energy_virtual
+    loss = region_nll + lambda_sym * sym + energy + beta_kl * kl + beta_noise_prior * noise_prior
     metrics = {
         "loss": loss.detach(),
         "region_nll": region_nll.detach(),
@@ -625,6 +645,9 @@ def visibility_physical_objective(
         "nll_high_freq": nll_high_freq.detach(),
         "nll_radial_bins": nll_radial_bins.detach(),
         "hermitian": sym.detach(),
+        "energy": energy.detach(),
+        "energy_original": energy_orig.detach(),
+        "energy_virtual": energy_virtual.detach(),
         "kl": kl.detach(),
         "noise_prior": noise_prior.detach(),
     }

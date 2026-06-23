@@ -211,15 +211,17 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--context-dropout", type=float, default=0.15)
+    parser.add_argument("--context-dropout", type=float, default=0.0)
     parser.add_argument("--beta-kl", type=float, default=1e-3)
     parser.add_argument("--beta-noise-prior", type=float, default=1e-4)
-    parser.add_argument("--lambda-orig", type=float, default=1.0)
-    parser.add_argument("--lambda-virtual", type=float, default=2.0)
-    parser.add_argument("--lambda-expanded", type=float, default=3.0)
-    parser.add_argument("--lambda-high-freq", type=float, default=1.0)
+    parser.add_argument("--lambda-orig", type=float, default=5.0)
+    parser.add_argument("--lambda-virtual", type=float, default=1.0)
+    parser.add_argument("--lambda-expanded", type=float, default=1.0)
+    parser.add_argument("--lambda-high-freq", type=float, default=0.5)
     parser.add_argument("--lambda-radial-bins", type=float, default=0.0)
-    parser.add_argument("--lambda-sym", type=float, default=0.1)
+    parser.add_argument("--lambda-sym", type=float, default=0.0)
+    parser.add_argument("--lambda-energy-orig", type=float, default=0.5)
+    parser.add_argument("--lambda-energy-virtual", type=float, default=0.5)
     parser.add_argument("--freq-alpha", type=float, default=2.0)
     parser.add_argument("--freq-gamma", type=float, default=1.0)
     parser.add_argument("--num-radial-bins", type=int, default=8)
@@ -295,6 +297,8 @@ def main() -> None:
         "lambda_high_freq": args.lambda_high_freq,
         "lambda_radial_bins": args.lambda_radial_bins,
         "lambda_sym": args.lambda_sym,
+        "lambda_energy_orig": args.lambda_energy_orig,
+        "lambda_energy_virtual": args.lambda_energy_virtual,
         "freq_alpha": args.freq_alpha,
         "freq_gamma": args.freq_gamma,
         "num_radial_bins": args.num_radial_bins,

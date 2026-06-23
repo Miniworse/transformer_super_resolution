@@ -44,6 +44,14 @@ observed visibility encoder -> expanded uv query decoder -> predicted visibility
 
 Use `--architecture encoder` to run the older single-encoder baseline.
 
+For encoder-decoder, observed uv outputs use a residual denoising path:
+
+```text
+V_hat_obs = V_obs + delta
+```
+
+Expanded-only uv points are still predicted as query values.
+
 ## Install
 
 Install PyTorch for your CUDA/CPU environment first, then:
@@ -91,6 +99,43 @@ If you intentionally train with noisy targets only, omit `--target-suffix` and a
 
 ```powershell
 --target-is-noisy
+```
+
+For the first encoder-decoder anti-collapse phase, use the defaults or make them
+explicit:
+
+```powershell
+python scripts/train.py `
+  --data-root srdata/srdata16Juin/interval5_AMtown01 `
+  --input-suffix noised_1 `
+  --target-suffix unnoised `
+  --architecture encoder-decoder `
+  --context-dropout 0.0 `
+  --lambda-orig 5.0 `
+  --lambda-virtual 1.0 `
+  --lambda-expanded 1.0 `
+  --lambda-high-freq 0.5 `
+  --lambda-radial-bins 0.0 `
+  --lambda-sym 0.0 `
+  --run-dir runs/bvt_encdec_phase1
+```
+
+After the original uv no longer flattens, restore expansion emphasis:
+
+```powershell
+python scripts/train.py `
+  --data-root srdata/srdata16Juin/interval5_AMtown01 `
+  --input-suffix noised_1 `
+  --target-suffix unnoised `
+  --architecture encoder-decoder `
+  --context-dropout 0.03 `
+  --lambda-orig 2.0 `
+  --lambda-virtual 2.0 `
+  --lambda-expanded 3.0 `
+  --lambda-high-freq 1.0 `
+  --lambda-radial-bins 1.0 `
+  --lambda-sym 0.1 `
+  --run-dir runs/bvt_encdec_phase2
 ```
 
 ## Test
@@ -173,6 +218,9 @@ nll_expanded_only
 nll_high_freq
 nll_radial_bins
 hermitian
+energy
+energy_original
+energy_virtual
 kl
 noise_prior
 ```
@@ -185,23 +233,21 @@ amplitude, predicted amplitude, and visibility error amplitude.
 The training script uses region-separated losses:
 
 ```text
-lambda_orig = 1.0
-lambda_virtual = 2.0
-lambda_expanded = 3.0
-lambda_high_freq = 1.0
+lambda_orig = 5.0
+lambda_virtual = 1.0
+lambda_expanded = 1.0
+lambda_high_freq = 0.5
 lambda_radial_bins = 0.0
-lambda_sym = 0.1
+lambda_sym = 0.0
+lambda_energy_orig = 0.5
+lambda_energy_virtual = 0.5
 freq_alpha = 2.0
 freq_gamma = 1.0
 num_radial_bins = 8
 ```
 
-These defaults restore the gentler former weighting while keeping Hermitian
-symmetry regularization:
-
-```text
-V(-u, -v) = conj(V(u, v))
-```
+These defaults prioritize learning a non-collapsed observed-uv denoising path
+before emphasizing expanded-only uv prediction.
 
 The radial-bin term is still available with `--lambda-radial-bins`, but it is
 disabled by default because it was too aggressive in the latest run.
