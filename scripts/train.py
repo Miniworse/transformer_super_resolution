@@ -346,23 +346,36 @@ def main() -> None:
                 fig = make_uv_figure(sample, out.clean_mean)
                 writer.add_figure("val/uv_amplitude", fig, epoch)
 
+        best_metric_name = "expanded_only/rmse"
+        best_metric = val_metrics.get(best_metric_name, math.nan)
+        if math.isnan(best_metric):
+            best_metric_name = "all/rmse"
+            best_metric = val_metrics.get(best_metric_name, math.nan)
+        if math.isnan(best_metric):
+            best_metric_name = "loss"
+            best_metric = val_metrics[best_metric_name]
+
         checkpoint = {
             "epoch": epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "args": serializable_args(args),
             "val_metrics": val_metrics,
+            "best_metric_name": best_metric_name,
+            "best_metric": best_metric,
         }
         torch.save(checkpoint, args.run_dir / "checkpoints" / "last.pt")
-        if val_metrics["loss"] < best_val:
-            best_val = val_metrics["loss"]
+        if best_metric < best_val:
+            best_val = best_metric
             torch.save(checkpoint, args.run_dir / "checkpoints" / "best.pt")
 
         print(
             f"epoch={epoch:04d} "
             f"train_loss={train_metrics.get('loss', math.nan):.6f} "
             f"val_loss={val_metrics.get('loss', math.nan):.6f} "
-            f"val_exp_rmse={val_metrics.get('expanded_only/rmse', math.nan):.6f}"
+            f"val_all_rmse={val_metrics.get('all/rmse', math.nan):.6f} "
+            f"val_exp_rmse={val_metrics.get('expanded_only/rmse', math.nan):.6f} "
+            f"best_metric={best_metric_name}:{best_metric:.6f}"
         )
 
     writer.close()
