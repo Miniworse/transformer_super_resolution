@@ -784,23 +784,60 @@ def srdata_path(root: str | Path, kind: str, scene_id: int, expand_id: int, suff
     return Path(root) / f"{kind}_{scene_id:04d}_expand_{expand_id}_{suffix}.npy"
 
 
+def _srdata_candidate_paths(
+    root: str | Path,
+    kind: str,
+    scene_id: int,
+    expand_id: int,
+    suffix: str,
+) -> list[Path]:
+    root = Path(root)
+    paths = [srdata_path(root, kind, scene_id, expand_id, suffix)]
+    if suffix != "unnoised":
+        paths.append(srdata_path(root, kind, scene_id, expand_id, "unnoised"))
+
+    if kind in {"uv", "redundant"}:
+        paths.append(root / f"{kind}_expand_{expand_id}_{suffix}.npy")
+        if suffix != "unnoised":
+            paths.append(root / f"{kind}_expand_{expand_id}_unnoised.npy")
+        paths.append(root / f"{kind}_expand_{expand_id}.npy")
+
+    return paths
+
+
+def _first_existing_path(paths: list[Path]) -> Optional[Path]:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
 def _load_npy(path: str | Path) -> Tensor:
     import numpy as np
 
     return torch.from_numpy(np.load(path)).to(torch.float32)
 
 
-def _load_npy_with_unnoised_fallback(
+def _load_npy_from_candidates(
     root: str | Path,
     kind: str,
     scene_id: int,
     expand_id: int,
     suffix: str,
 ) -> Tensor:
-    path = srdata_path(root, kind, scene_id, expand_id, suffix)
-    if not path.exists() and suffix != "unnoised":
-        path = srdata_path(root, kind, scene_id, expand_id, "unnoised")
+    candidates = _srdata_candidate_paths(root, kind, scene_id, expand_id, suffix)
+    path = _first_existing_path(candidates)
+    if path is None:
+        path = candidates[0]
     return _load_npy(path)
+
+
+def _synthetic_redundancy_like(visibility: Tensor) -> Tensor:
+    visibility_batch = _visibility_array_to_batch_last(visibility, "visibility")
+    redundancy = torch.ones((*visibility_batch.shape[:2], 2), dtype=visibility_batch.dtype)
+    if visibility.ndim == 2:
+        return redundancy.squeeze(0)
+    return redundancy
 
 
 def load_srdata_arrays(
@@ -813,14 +850,18 @@ def load_srdata_arrays(
     """Load one simulated scene/expand sample.
 
     Returns ``uv``, input ``visibility``, ``redundant``, and target visibility,
-    all with the current [V, 2] layout. When fixed-noise files arrive, use
-    ``input_suffix="noised_1", target_suffix="unnoised"`` for clean supervised
-    denoising, or leave ``target_suffix=None`` for noisy-label training.
+    all with the current [V, 2] layout. Datasets may store uv/redundancy either
+    per scene or once per expansion as ``uv_expand_#.npy``. If redundancy is not
+    provided, every token is treated as both observed and supervised, which is
+    appropriate for denoising-only grids with no explicit expanded-only region.
     """
     target_suffix = input_suffix if target_suffix is None else target_suffix
-    uv = _load_npy_with_unnoised_fallback(root, "uv", scene_id, expand_id, input_suffix)
+    uv = _load_npy_from_candidates(root, "uv", scene_id, expand_id, input_suffix)
     visibility = _load_npy(srdata_path(root, "visibility", scene_id, expand_id, input_suffix))
-    redundancy = _load_npy_with_unnoised_fallback(root, "redundant", scene_id, expand_id, input_suffix)
+    redundancy_path = _first_existing_path(
+        _srdata_candidate_paths(root, "redundant", scene_id, expand_id, input_suffix)
+    )
+    redundancy = _load_npy(redundancy_path) if redundancy_path is not None else _synthetic_redundancy_like(visibility)
     target_visibility = _load_npy(srdata_path(root, "visibility", scene_id, expand_id, target_suffix))
     return uv, visibility, redundancy, target_visibility
 
@@ -854,17 +895,11 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
             if expand_filter is not None and expand_id not in expand_filter:
                 continue
 
-            required = [
-                srdata_path(self.root, "uv", scene_id, expand_id, input_suffix)
-                if srdata_path(self.root, "uv", scene_id, expand_id, input_suffix).exists()
-                else srdata_path(self.root, "uv", scene_id, expand_id, "unnoised"),
-                srdata_path(self.root, "redundant", scene_id, expand_id, input_suffix)
-                if srdata_path(self.root, "redundant", scene_id, expand_id, input_suffix).exists()
-                else srdata_path(self.root, "redundant", scene_id, expand_id, "unnoised"),
-            ]
+            uv_path = _first_existing_path(_srdata_candidate_paths(self.root, "uv", scene_id, expand_id, input_suffix))
+            required = [uv_path]
             if target_suffix is not None:
                 required.append(srdata_path(self.root, "visibility", scene_id, expand_id, target_suffix))
-            if all(item.exists() for item in required):
+            if all(item is not None and item.exists() for item in required):
                 samples.append((scene_id, expand_id))
 
         self.samples = sorted(samples)
