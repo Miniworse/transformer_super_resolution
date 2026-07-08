@@ -19,8 +19,8 @@ Expected training target:
 
 The model predicts the clean visibility posterior for both known and unknown uv:
     clean_mean:      [batch, n_token, 2]
-    clean_logvar:    [batch, n_token, 2]
-    noise_logvar:    [batch, n_token, 2]
+    clean_logvar:    [batch, n_token, 1]  complex variance log E[|e|^2]
+    noise_logvar:    [batch, n_token, 1]  complex variance log E[|n|^2]
 
 For clean targets, keep ``target_is_noisy=False``. For noisy training targets,
 use ``target_is_noisy=True`` so the likelihood marginalizes clean uncertainty
@@ -93,6 +93,33 @@ def gaussian_nll(
     logvar = logvar.clamp(-14.0, 8.0)
     loss = 0.5 * (math.log(2.0 * math.pi) + logvar + (target - mean).pow(2) * torch.exp(-logvar))
     loss = loss.sum(dim=-1)
+    if mask is None and weight is None:
+        return loss.mean()
+    if mask is None:
+        weights = torch.ones_like(loss)
+    else:
+        weights = mask.to(loss.dtype)
+    if weight is not None:
+        weights = weights * weight.to(loss.dtype)
+    return (loss * weights).sum() / weights.sum().clamp_min(1.0)
+
+
+def complex_gaussian_nll(
+    target: Tensor,
+    mean: Tensor,
+    logvar: Tensor,
+    mask: Optional[Tensor] = None,
+    weight: Optional[Tensor] = None,
+) -> Tensor:
+    """Masked circular complex Gaussian NLL.
+
+    ``logvar`` is one scalar per complex visibility token and represents the
+    complex variance E[|V - mean|^2]. The density is
+    p(V) = 1 / (pi * var) * exp(-|V - mean|^2 / var).
+    """
+    logvar = logvar.clamp(-14.0, 8.0).squeeze(-1)
+    squared_error = (target - mean).pow(2).sum(dim=-1)
+    loss = math.log(math.pi) + logvar + squared_error * torch.exp(-logvar)
     if mask is None and weight is None:
         return loss.mean()
     if mask is None:
@@ -287,7 +314,7 @@ class BayesianVisibilityTransformer(nn.Module):
             nn.Linear(model_dim, model_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(model_dim, 6),
+            nn.Linear(model_dim, 4),
         )
 
     def forward(
@@ -310,8 +337,8 @@ class BayesianVisibilityTransformer(nn.Module):
 
         pred = self.head(encoded)
         clean_mean = pred[..., :2]
-        clean_logvar = pred[..., 2:4].clamp(-12.0, 6.0)
-        noise_logvar = pred[..., 4:6].clamp(-12.0, 6.0)
+        clean_logvar = pred[..., 2:3].clamp(-12.0, 6.0)
+        noise_logvar = pred[..., 3:4].clamp(-12.0, 6.0)
 
         return BVTOutput(
             clean_mean=clean_mean,
@@ -394,7 +421,7 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             nn.Linear(model_dim, model_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(model_dim, 6),
+            nn.Linear(model_dim, 4),
         )
 
     def forward(
@@ -433,8 +460,8 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             values + delta_or_value,
             delta_or_value,
         )
-        clean_logvar = pred[..., 2:4].clamp(-12.0, 6.0)
-        noise_logvar = pred[..., 4:6].clamp(-12.0, 6.0)
+        clean_logvar = pred[..., 2:3].clamp(-12.0, 6.0)
+        noise_logvar = pred[..., 3:4].clamp(-12.0, 6.0)
 
         return BVTOutput(
             clean_mean=clean_mean,
@@ -464,7 +491,7 @@ def training_objective(
     """
 
     likelihood_logvar = output.total_logvar if target_is_noisy else output.clean_logvar
-    nll = gaussian_nll(target_values, output.clean_mean, likelihood_logvar, target_mask, target_weight)
+    nll = complex_gaussian_nll(target_values, output.clean_mean, likelihood_logvar, target_mask, target_weight)
     kl = kl_normal(output.latent_mean, output.latent_logvar, output.prior_mean, output.prior_logvar)
 
     # Mildly discourages explaining every error as measurement noise while still
@@ -576,6 +603,25 @@ def complex_energy_loss(pred_values: Tensor, target_values: Tensor, mask: Tensor
     return (pred_energy / target_energy - 1.0).abs()
 
 
+def complex_phase_loss(
+    pred_values: Tensor,
+    target_values: Tensor,
+    mask: Tensor,
+    amplitude_floor: float = 1e-6,
+) -> Tensor:
+    """Amplitude-weighted wrapped phase loss for complex visibility."""
+    target_amp = torch.linalg.norm(target_values, dim=-1)
+    phase_weight = mask.to(pred_values.dtype) * target_amp
+    phase_weight = phase_weight.masked_fill(target_amp <= amplitude_floor, 0.0)
+    if phase_weight.sum() == 0:
+        return pred_values.new_zeros(())
+
+    pred_phase = torch.atan2(pred_values[..., 1], pred_values[..., 0])
+    target_phase = torch.atan2(target_values[..., 1], target_values[..., 0])
+    phase_error = 1.0 - torch.cos(pred_phase - target_phase)
+    return (phase_error * phase_weight).sum() / phase_weight.sum().clamp_min(1e-8)
+
+
 def visibility_physical_objective(
     output: BVTOutput,
     batch: VisibilityRegionInput,
@@ -590,6 +636,7 @@ def visibility_physical_objective(
     lambda_sym: float = 0.1,
     lambda_energy_orig: float = 0.5,
     lambda_energy_virtual: float = 0.5,
+    lambda_phase: float = 0.1,
     freq_alpha: float = 2.0,
     freq_gamma: float = 1.0,
     num_radial_bins: int = 8,
@@ -601,17 +648,17 @@ def visibility_physical_objective(
     freq_weights = radial_frequency_weights(batch.coords, batch.token_mask, freq_alpha, freq_gamma)
     radial_bin_weights = radial_bin_balanced_weights(batch.coords, expanded_mask, num_radial_bins)
 
-    nll_orig = gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, batch.original_mask)
-    nll_virtual = gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, batch.virtual_mask)
-    nll_expanded = gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, expanded_mask)
-    nll_high_freq = gaussian_nll(
+    nll_orig = complex_gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, batch.original_mask)
+    nll_virtual = complex_gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, batch.virtual_mask)
+    nll_expanded = complex_gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, expanded_mask)
+    nll_high_freq = complex_gaussian_nll(
         batch.target_values,
         output.clean_mean,
         likelihood_logvar,
         expanded_mask,
         weight=freq_weights,
     )
-    nll_radial_bins = gaussian_nll(
+    nll_radial_bins = complex_gaussian_nll(
         batch.target_values,
         output.clean_mean,
         likelihood_logvar,
@@ -626,6 +673,9 @@ def visibility_physical_objective(
     sym = hermitian_symmetry_loss(output.clean_mean, batch.coords, batch.token_mask, symmetry_tolerance)
     energy_orig = complex_energy_loss(output.clean_mean, batch.target_values, batch.original_mask)
     energy_virtual = complex_energy_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
+    phase = complex_phase_loss(output.clean_mean, batch.target_values, batch.target_mask)
+    phase_orig = complex_phase_loss(output.clean_mean, batch.target_values, batch.original_mask)
+    phase_virtual = complex_phase_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
 
     region_nll = (
         lambda_orig * nll_orig
@@ -635,7 +685,7 @@ def visibility_physical_objective(
         + lambda_radial_bins * nll_radial_bins
     )
     energy = lambda_energy_orig * energy_orig + lambda_energy_virtual * energy_virtual
-    loss = region_nll + lambda_sym * sym + energy + beta_kl * kl + beta_noise_prior * noise_prior
+    loss = region_nll + lambda_sym * sym + energy + lambda_phase * phase + beta_kl * kl + beta_noise_prior * noise_prior
     metrics = {
         "loss": loss.detach(),
         "region_nll": region_nll.detach(),
@@ -648,6 +698,9 @@ def visibility_physical_objective(
         "energy": energy.detach(),
         "energy_original": energy_orig.detach(),
         "energy_virtual": energy_virtual.detach(),
+        "phase": phase.detach(),
+        "phase_original": phase_orig.detach(),
+        "phase_virtual": phase_virtual.detach(),
         "kl": kl.detach(),
         "noise_prior": noise_prior.detach(),
     }

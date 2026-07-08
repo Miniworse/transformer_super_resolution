@@ -222,6 +222,7 @@ def main() -> None:
     parser.add_argument("--lambda-sym", type=float, default=0.0)
     parser.add_argument("--lambda-energy-orig", type=float, default=0.5)
     parser.add_argument("--lambda-energy-virtual", type=float, default=0.5)
+    parser.add_argument("--lambda-phase", type=float, default=0.1)
     parser.add_argument("--freq-alpha", type=float, default=2.0)
     parser.add_argument("--freq-gamma", type=float, default=1.0)
     parser.add_argument("--num-radial-bins", type=int, default=8)
@@ -299,6 +300,7 @@ def main() -> None:
         "lambda_sym": args.lambda_sym,
         "lambda_energy_orig": args.lambda_energy_orig,
         "lambda_energy_virtual": args.lambda_energy_virtual,
+        "lambda_phase": args.lambda_phase,
         "freq_alpha": args.freq_alpha,
         "freq_gamma": args.freq_gamma,
         "num_radial_bins": args.num_radial_bins,
