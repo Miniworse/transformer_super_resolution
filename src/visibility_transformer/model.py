@@ -603,6 +603,25 @@ def complex_energy_loss(pred_values: Tensor, target_values: Tensor, mask: Tensor
     return (pred_energy / target_energy - 1.0).abs()
 
 
+def complex_normalized_mse(
+    pred_values: Tensor,
+    target_values: Tensor,
+    mask: Tensor,
+    weight: Optional[Tensor] = None,
+) -> Tensor:
+    """Complex MSE normalized by target power in a masked region."""
+    if mask.sum() == 0:
+        return pred_values.new_zeros(())
+    weights = mask.to(pred_values.dtype)
+    if weight is not None:
+        weights = weights * weight.to(pred_values.dtype)
+    squared_error = (pred_values - target_values).pow(2).sum(dim=-1)
+    target_power = target_values.pow(2).sum(dim=-1)
+    numerator = (squared_error * weights).sum()
+    denominator = (target_power * weights).sum().clamp_min(1e-8)
+    return numerator / denominator
+
+
 def complex_phase_loss(
     pred_values: Tensor,
     target_values: Tensor,
@@ -637,6 +656,8 @@ def visibility_physical_objective(
     lambda_energy_orig: float = 0.5,
     lambda_energy_virtual: float = 0.5,
     lambda_phase: float = 0.1,
+    lambda_phase_expanded: float = 0.0,
+    lambda_expanded_nmse: float = 0.0,
     freq_alpha: float = 2.0,
     freq_gamma: float = 1.0,
     num_radial_bins: int = 8,
@@ -673,9 +694,17 @@ def visibility_physical_objective(
     sym = hermitian_symmetry_loss(output.clean_mean, batch.coords, batch.token_mask, symmetry_tolerance)
     energy_orig = complex_energy_loss(output.clean_mean, batch.target_values, batch.original_mask)
     energy_virtual = complex_energy_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
+    expanded_nmse = complex_normalized_mse(output.clean_mean, batch.target_values, expanded_mask)
+    expanded_radial_nmse = complex_normalized_mse(
+        output.clean_mean,
+        batch.target_values,
+        expanded_mask,
+        weight=radial_bin_weights,
+    )
     phase = complex_phase_loss(output.clean_mean, batch.target_values, batch.target_mask)
     phase_orig = complex_phase_loss(output.clean_mean, batch.target_values, batch.original_mask)
     phase_virtual = complex_phase_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
+    phase_expanded = complex_phase_loss(output.clean_mean, batch.target_values, expanded_mask)
 
     region_nll = (
         lambda_orig * nll_orig
@@ -685,7 +714,9 @@ def visibility_physical_objective(
         + lambda_radial_bins * nll_radial_bins
     )
     energy = lambda_energy_orig * energy_orig + lambda_energy_virtual * energy_virtual
-    loss = region_nll + lambda_sym * sym + energy + lambda_phase * phase + beta_kl * kl + beta_noise_prior * noise_prior
+    sr_mean_loss = lambda_expanded_nmse * expanded_radial_nmse
+    phase_loss = lambda_phase * phase + lambda_phase_expanded * phase_expanded
+    loss = region_nll + lambda_sym * sym + energy + sr_mean_loss + phase_loss + beta_kl * kl + beta_noise_prior * noise_prior
     metrics = {
         "loss": loss.detach(),
         "region_nll": region_nll.detach(),
@@ -698,9 +729,14 @@ def visibility_physical_objective(
         "energy": energy.detach(),
         "energy_original": energy_orig.detach(),
         "energy_virtual": energy_virtual.detach(),
+        "expanded_nmse_loss": expanded_nmse.detach(),
+        "expanded_radial_nmse_loss": expanded_radial_nmse.detach(),
+        "sr_mean_loss": sr_mean_loss.detach(),
         "phase": phase.detach(),
         "phase_original": phase_orig.detach(),
         "phase_virtual": phase_virtual.detach(),
+        "phase_expanded_only": phase_expanded.detach(),
+        "phase_loss": phase_loss.detach(),
         "kl": kl.detach(),
         "noise_prior": noise_prior.detach(),
     }

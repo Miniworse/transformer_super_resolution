@@ -104,6 +104,8 @@ def main() -> None:
         "lambda_energy_orig": float(ckpt_args.get("lambda_energy_orig", 0.5)),
         "lambda_energy_virtual": float(ckpt_args.get("lambda_energy_virtual", 0.5)),
         "lambda_phase": float(ckpt_args.get("lambda_phase", 0.1)),
+        "lambda_phase_expanded": float(ckpt_args.get("lambda_phase_expanded", 0.0)),
+        "lambda_expanded_nmse": float(ckpt_args.get("lambda_expanded_nmse", 0.0)),
         "freq_alpha": float(ckpt_args.get("freq_alpha", 2.0)),
         "freq_gamma": float(ckpt_args.get("freq_gamma", 1.0)),
         "num_radial_bins": int(ckpt_args.get("num_radial_bins", 8)),

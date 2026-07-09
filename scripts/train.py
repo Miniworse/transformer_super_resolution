@@ -61,6 +61,7 @@ def region_metrics(pred: Tensor, target: Tensor, mask: Tensor, prefix: str) -> d
             f"{prefix}/rmse": math.nan,
             f"{prefix}/mae": math.nan,
             f"{prefix}/nmse_db": math.nan,
+            f"{prefix}/corr": math.nan,
         }
 
     diff = pred - target
@@ -68,11 +69,19 @@ def region_metrics(pred: Tensor, target: Tensor, mask: Tensor, prefix: str) -> d
     mae = masked_mean(diff.abs(), component_mask)
     power = masked_mean(target.pow(2), component_mask).clamp_min(1e-12)
     nmse = mse / power
+    selected = component_mask.bool()
+    corr_num = (pred * target).masked_select(selected).sum()
+    corr_den = torch.sqrt(
+        pred.pow(2).masked_select(selected).sum().clamp_min(1e-12)
+        * target.pow(2).masked_select(selected).sum().clamp_min(1e-12)
+    )
+    corr = corr_num / corr_den
     return {
         f"{prefix}/mse": float(mse.detach().cpu()),
         f"{prefix}/rmse": float(torch.sqrt(mse).detach().cpu()),
         f"{prefix}/mae": float(mae.detach().cpu()),
         f"{prefix}/nmse_db": float((10.0 * torch.log10(nmse)).detach().cpu()),
+        f"{prefix}/corr": float(corr.detach().cpu()),
     }
 
 
@@ -223,6 +232,8 @@ def main() -> None:
     parser.add_argument("--lambda-energy-orig", type=float, default=0.5)
     parser.add_argument("--lambda-energy-virtual", type=float, default=0.5)
     parser.add_argument("--lambda-phase", type=float, default=0.1)
+    parser.add_argument("--lambda-phase-expanded", type=float, default=0.0)
+    parser.add_argument("--lambda-expanded-nmse", type=float, default=0.0)
     parser.add_argument("--freq-alpha", type=float, default=2.0)
     parser.add_argument("--freq-gamma", type=float, default=1.0)
     parser.add_argument("--num-radial-bins", type=int, default=8)
@@ -301,6 +312,8 @@ def main() -> None:
         "lambda_energy_orig": args.lambda_energy_orig,
         "lambda_energy_virtual": args.lambda_energy_virtual,
         "lambda_phase": args.lambda_phase,
+        "lambda_phase_expanded": args.lambda_phase_expanded,
+        "lambda_expanded_nmse": args.lambda_expanded_nmse,
         "freq_alpha": args.freq_alpha,
         "freq_gamma": args.freq_gamma,
         "num_radial_bins": args.num_radial_bins,
