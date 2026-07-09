@@ -252,6 +252,7 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--figure-every", type=int, default=5)
+    parser.add_argument("--checkpoint-every", type=int, default=0)
     args = parser.parse_args()
 
     from torch.utils.tensorboard import SummaryWriter
@@ -380,6 +381,8 @@ def main() -> None:
             "best_metric": best_metric,
         }
         torch.save(checkpoint, args.run_dir / "checkpoints" / "last.pt")
+        if args.checkpoint_every > 0 and epoch % args.checkpoint_every == 0:
+            torch.save(checkpoint, args.run_dir / "checkpoints" / f"epoch_{epoch:04d}.pt")
         if best_metric < best_val:
             best_val = best_metric
             torch.save(checkpoint, args.run_dir / "checkpoints" / "best.pt")
