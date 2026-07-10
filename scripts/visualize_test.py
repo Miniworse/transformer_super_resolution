@@ -22,8 +22,7 @@ from train import compute_metrics, move_batch  # noqa: E402
 from visibility_transformer import (  # noqa: E402
     BayesianVisibilityEncoderDecoder,
     BayesianVisibilityTransformer,
-    build_visibility_region_inputs,
-    load_srdata_arrays,
+    SRVisibilityDataset,
 )
 
 
@@ -248,6 +247,8 @@ def main() -> None:
     parser.add_argument("--input-suffix", default=None)
     parser.add_argument("--target-suffix", default=None)
     parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--context-expand-id", type=int, default=None)
+    parser.add_argument("--visibility-normalization", choices=["none", "original-rms"], default=None)
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--chunk-size", type=int, default=256)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -259,26 +260,29 @@ def main() -> None:
     output_dir = args.output_dir or args.checkpoint.parent.parent / "visualizations"
     input_suffix = args.input_suffix or ckpt_args.get("input_suffix", "unnoised")
     target_suffix = args.target_suffix if args.target_suffix is not None else ckpt_args.get("target_suffix")
+    context_expand_id = (
+        args.context_expand_id
+        if args.context_expand_id is not None
+        else ckpt_args.get("context_expand_id")
+    )
+    visibility_normalization = args.visibility_normalization or ckpt_args.get("visibility_normalization", "none")
     include_virtual_context = (
         bool(ckpt_args.get("include_virtual_context", False))
         if args.include_virtual_context is None
         else args.include_virtual_context
     )
 
-    uv, visibility, redundancy, target_visibility = load_srdata_arrays(
+    dataset = SRVisibilityDataset(
         data_root,
-        args.scene_id,
-        args.expand_id,
+        scene_ids=[args.scene_id],
+        expand_ids=[args.expand_id],
         input_suffix=input_suffix,
         target_suffix=target_suffix,
-    )
-    batch = build_visibility_region_inputs(
-        uv,
-        visibility,
-        redundancy,
-        target_visibility=target_visibility,
         include_virtual_context=include_virtual_context,
+        context_expand_id=None if context_expand_id is None else int(context_expand_id),
+        visibility_normalization=visibility_normalization,
     )
+    batch = dataset[0]
 
     model = create_model_from_args(ckpt_args)
     model.load_state_dict(checkpoint["model"])
@@ -298,15 +302,19 @@ def main() -> None:
 
     batch_cpu = move_batch(device_batch, torch.device("cpu"))
     pred_cpu = output.clean_mean.detach().cpu()[0]
+    scale_cpu = batch_cpu.visibility_scale[0]
+    input_values = batch_cpu.values[0] * scale_cpu
+    pred_values = pred_cpu * scale_cpu
+    target_values = batch_cpu.target_values[0] * scale_cpu
     image_mask = batch_cpu.virtual_mask[0] | batch_cpu.original_mask[0]
     output_path = output_dir / f"scene_{args.scene_id:04d}_expand_{args.expand_id}_comparison.png"
 
     image_metrics = plot_visualization(
         output_path,
         batch_cpu.coords[0],
-        batch_cpu.values[0],
-        pred_cpu,
-        batch_cpu.target_values[0],
+        input_values,
+        pred_values,
+        target_values,
         batch_cpu.original_mask[0],
         batch_cpu.target_mask[0],
         image_mask,

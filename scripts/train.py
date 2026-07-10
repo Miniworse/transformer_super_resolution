@@ -44,6 +44,7 @@ def move_batch(batch: VisibilityRegionInput, device: torch.device) -> Visibility
         target_mask=batch.target_mask.to(device),
         original_mask=batch.original_mask.to(device),
         virtual_mask=batch.virtual_mask.to(device),
+        visibility_scale=batch.visibility_scale.to(device),
     )
 
 
@@ -86,7 +87,9 @@ def region_metrics(pred: Tensor, target: Tensor, mask: Tensor, prefix: str) -> d
 
 
 def compute_metrics(batch: VisibilityRegionInput, pred: Tensor) -> dict[str, float]:
-    target = batch.target_values
+    scale = batch.visibility_scale.to(pred.device)
+    pred = pred * scale
+    target = batch.target_values * scale
     expanded_only = batch.virtual_mask & ~batch.original_mask
     metrics = {}
     for name, mask in [
@@ -210,6 +213,8 @@ def main() -> None:
     parser.add_argument("--target-suffix", default=None)
     parser.add_argument("--target-is-noisy", action="store_true")
     parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--context-expand-id", type=int, default=None)
+    parser.add_argument("--visibility-normalization", choices=["none", "original-rms"], default="none")
     parser.add_argument("--expand-ids", default="0,1,2,3,4")
     parser.add_argument("--train-scenes", default="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,"
                         "21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,"
@@ -273,6 +278,8 @@ def main() -> None:
         input_suffix=args.input_suffix,
         target_suffix=args.target_suffix,
         include_virtual_context=args.include_virtual_context,
+        context_expand_id=args.context_expand_id,
+        visibility_normalization=args.visibility_normalization,
     )
     val_dataset = SRVisibilityDataset(
         args.data_root,
@@ -281,6 +288,8 @@ def main() -> None:
         input_suffix=args.input_suffix,
         target_suffix=args.target_suffix,
         include_virtual_context=args.include_virtual_context,
+        context_expand_id=args.context_expand_id,
+        visibility_normalization=args.visibility_normalization,
     )
 
     train_loader = DataLoader(

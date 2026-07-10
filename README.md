@@ -36,6 +36,20 @@ marks the expanded virtual region used as target support.
 By default, the model uses only original known visibility as context. You can
 allow virtual visibility as context with `--include-virtual-context`.
 
+For a fixed-observation super-resolution setup, use `--context-expand-id 0`.
+This keeps the target/query uv and redundancy from each requested expand level
+`k`, but aligns `visibility_scene_expand_0_noised_1` onto the tokens marked by
+`redundant[:, 0]`. The resulting task is:
+
+```text
+expand_0 noisy observed visibility + expand_k query uv -> expand_k clean visibility
+```
+
+Use `--visibility-normalization original-rms` to divide both input and target
+complex visibility by the RMS amplitude of the observed expand-0/original
+context for that scene. Losses are optimized in normalized units; evaluation and
+visualization metrics are converted back to raw visibility units.
+
 Training now defaults to the encoder-decoder architecture:
 
 ```text
@@ -113,6 +127,8 @@ python scripts/train.py `
   --data-root srdata/srdata16Juin/interval5_AMtown01 `
   --input-suffix noised_1 `
   --target-suffix unnoised `
+  --context-expand-id 0 `
+  --visibility-normalization original-rms `
   --architecture encoder-decoder `
   --context-dropout 0.0 `
   --lambda-orig 5.0 `

@@ -53,6 +53,7 @@ class VisibilityRegionInput:
     target_mask: Tensor
     original_mask: Tensor
     virtual_mask: Tensor
+    visibility_scale: Tensor
 
 
 @dataclass
@@ -843,6 +844,72 @@ def _channel_first_to_batch_last(x: Tensor | object, name: str, channels: int = 
     return _visibility_array_to_batch_last(x, name, channels)
 
 
+def _single_visibility_array(x: Tensor | object, name: str) -> Tensor:
+    x = _visibility_array_to_batch_last(x, name)
+    if x.shape[0] != 1:
+        raise ValueError(f"{name} must describe one scene, got batch size {x.shape[0]}.")
+    return x.squeeze(0)
+
+
+def _uv_key(coord: Tensor, decimals: int = 5) -> tuple[float, float]:
+    return (round(float(coord[0]), decimals), round(float(coord[1]), decimals))
+
+
+def align_visibility_to_target_uv(
+    target_uv: Tensor | object,
+    source_uv: Tensor | object,
+    source_visibility: Tensor | object,
+    target_original_mask: Tensor | object,
+) -> Tensor:
+    """Place source visibility values on matching target uv positions.
+
+    ``target_original_mask`` should mark the target-grid tokens that correspond
+    to the observed source support, usually redundancy column 0.
+    """
+    target_coords = _single_visibility_array(target_uv, "target_uv")
+    source_coords = _single_visibility_array(source_uv, "source_uv")
+    source_values = _single_visibility_array(source_visibility, "source_visibility")
+    original_mask = torch.as_tensor(target_original_mask, dtype=torch.bool)
+    if original_mask.ndim == 2:
+        if original_mask.shape[0] != 1:
+            raise ValueError(f"target_original_mask must describe one scene, got shape {tuple(original_mask.shape)}.")
+        original_mask = original_mask.squeeze(0)
+
+    if source_coords.shape[:1] != source_values.shape[:1]:
+        raise ValueError("source_uv and source_visibility must have the same token count.")
+    if target_coords.shape[0] != original_mask.shape[0]:
+        raise ValueError("target_uv and target_original_mask must have the same token count.")
+
+    source_by_uv = {_uv_key(coord): source_values[index] for index, coord in enumerate(source_coords)}
+    aligned = torch.zeros_like(target_coords)
+    missing = 0
+    for target_index in torch.where(original_mask)[0].tolist():
+        value = source_by_uv.get(_uv_key(target_coords[target_index]))
+        if value is None:
+            missing += 1
+            continue
+        aligned[target_index] = value
+    if missing:
+        raise ValueError(f"Could not align {missing} source uv points onto the target expansion grid.")
+    return aligned
+
+
+def _compute_visibility_scale(
+    input_values: Tensor,
+    original_mask: Tensor,
+    visibility_normalization: str,
+) -> Tensor:
+    if visibility_normalization == "none":
+        return input_values.new_ones((*input_values.shape[:1], 1, 1))
+    if visibility_normalization != "original-rms":
+        raise ValueError(f"Unsupported visibility normalization: {visibility_normalization!r}.")
+
+    weights = original_mask.to(input_values.dtype)
+    complex_power = input_values.pow(2).sum(dim=-1)
+    scale = ((complex_power * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)).sqrt()
+    return scale.clamp_min(1e-8).view(-1, 1, 1)
+
+
 def build_visibility_region_inputs(
     uv: Tensor | object,
     visibility: Tensor | object,
@@ -850,6 +917,7 @@ def build_visibility_region_inputs(
     valid_mask: Optional[Tensor | object] = None,
     target_visibility: Optional[Tensor | object] = None,
     include_virtual_context: bool = False,
+    visibility_normalization: str = "none",
 ) -> VisibilityRegionInput:
     """Pack native visibility-region arrays into the transformer's token API.
 
@@ -907,6 +975,9 @@ def build_visibility_region_inputs(
     original_mask = original_mask & token_mask
     virtual_mask = virtual_mask & token_mask
 
+    visibility_scale = _compute_visibility_scale(input_values, original_mask, visibility_normalization)
+    input_values = input_values / visibility_scale
+    target_values = target_values / visibility_scale
     values = input_values.masked_fill(~known_mask.unsqueeze(-1), 0.0)
 
     return VisibilityRegionInput(
@@ -919,6 +990,7 @@ def build_visibility_region_inputs(
         target_mask=target_mask,
         original_mask=original_mask,
         virtual_mask=virtual_mask,
+        visibility_scale=visibility_scale,
     )
 
 
@@ -1000,6 +1072,7 @@ def load_srdata_arrays(
     expand_id: int,
     input_suffix: str = "unnoised",
     target_suffix: Optional[str] = None,
+    context_expand_id: Optional[int] = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Load one simulated scene/expand sample.
 
@@ -1011,12 +1084,27 @@ def load_srdata_arrays(
     """
     target_suffix = input_suffix if target_suffix is None else target_suffix
     uv = _load_npy_from_candidates(root, "uv", scene_id, expand_id, input_suffix)
-    visibility = _load_npy(srdata_path(root, "visibility", scene_id, expand_id, input_suffix))
     redundancy_path = _first_existing_path(
         _srdata_candidate_paths(root, "redundant", scene_id, expand_id, input_suffix)
     )
-    redundancy = _load_npy(redundancy_path) if redundancy_path is not None else _synthetic_redundancy_like(visibility)
     target_visibility = _load_npy(srdata_path(root, "visibility", scene_id, expand_id, target_suffix))
+    redundancy = (
+        _load_npy(redundancy_path)
+        if redundancy_path is not None
+        else _synthetic_redundancy_like(target_visibility)
+    )
+    if context_expand_id is None or context_expand_id == expand_id:
+        visibility = _load_npy(srdata_path(root, "visibility", scene_id, expand_id, input_suffix))
+    else:
+        source_uv = _load_npy_from_candidates(root, "uv", scene_id, context_expand_id, input_suffix)
+        source_visibility = _load_npy(srdata_path(root, "visibility", scene_id, context_expand_id, input_suffix))
+        target_redundancy = _visibility_array_to_batch_last(redundancy, "redu").squeeze(0)
+        visibility = align_visibility_to_target_uv(
+            uv,
+            source_uv,
+            source_visibility,
+            target_redundancy[:, 0] > 0,
+        )
     return uv, visibility, redundancy, target_visibility
 
 
@@ -1031,12 +1119,16 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
         input_suffix: str = "unnoised",
         target_suffix: Optional[str] = None,
         include_virtual_context: bool = False,
+        context_expand_id: Optional[int] = None,
+        visibility_normalization: str = "none",
     ) -> None:
         super().__init__()
         self.root = Path(root)
         self.input_suffix = input_suffix
         self.target_suffix = target_suffix
         self.include_virtual_context = include_virtual_context
+        self.context_expand_id = context_expand_id
+        self.visibility_normalization = visibility_normalization
 
         scene_filter = None if scene_ids is None else set(scene_ids)
         expand_filter = None if expand_ids is None else set(expand_ids)
@@ -1051,6 +1143,14 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
 
             uv_path = _first_existing_path(_srdata_candidate_paths(self.root, "uv", scene_id, expand_id, input_suffix))
             required = [uv_path]
+            if context_expand_id is not None:
+                source_uv_path = _first_existing_path(
+                    _srdata_candidate_paths(self.root, "uv", scene_id, context_expand_id, input_suffix)
+                )
+                required.extend([
+                    source_uv_path,
+                    srdata_path(self.root, "visibility", scene_id, context_expand_id, input_suffix),
+                ])
             if target_suffix is not None:
                 required.append(srdata_path(self.root, "visibility", scene_id, expand_id, target_suffix))
             if all(item is not None and item.exists() for item in required):
@@ -1071,6 +1171,7 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
             expand_id,
             input_suffix=self.input_suffix,
             target_suffix=self.target_suffix,
+            context_expand_id=self.context_expand_id,
         )
         return build_visibility_region_inputs(
             uv,
@@ -1078,6 +1179,7 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
             redundancy,
             target_visibility=target_visibility,
             include_virtual_context=self.include_virtual_context,
+            visibility_normalization=self.visibility_normalization,
         )
 
 
@@ -1109,6 +1211,7 @@ def visibility_collate_fn(samples: list[VisibilityRegionInput]) -> VisibilityReg
         target_mask=torch.stack([pad_mask(sample.target_mask) for sample in samples], dim=0),
         original_mask=torch.stack([pad_mask(sample.original_mask) for sample in samples], dim=0),
         virtual_mask=torch.stack([pad_mask(sample.virtual_mask) for sample in samples], dim=0),
+        visibility_scale=torch.stack([sample.visibility_scale.squeeze(0) for sample in samples], dim=0),
     )
 
 

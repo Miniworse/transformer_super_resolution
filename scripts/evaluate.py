@@ -75,6 +75,8 @@ def main() -> None:
     parser.add_argument("--target-suffix", default=None)
     parser.add_argument("--target-is-noisy", action="store_true")
     parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--context-expand-id", type=int, default=None)
+    parser.add_argument("--visibility-normalization", choices=["none", "original-rms"], default=None)
     parser.add_argument("--expand-ids", default=None)
     parser.add_argument("--test-scenes", default="91,92,93,94,95,96,97,98,99,100")
     parser.add_argument("--batch-size", type=int, default=2)
@@ -91,6 +93,12 @@ def main() -> None:
     input_suffix = args.input_suffix or ckpt_args.get("input_suffix", "unnoised")
     target_suffix = args.target_suffix if args.target_suffix is not None else ckpt_args.get("target_suffix")
     expand_ids = parse_int_list(args.expand_ids or ckpt_args.get("expand_ids", "0,1,2,3,4"))
+    context_expand_id = (
+        args.context_expand_id
+        if args.context_expand_id is not None
+        else ckpt_args.get("context_expand_id")
+    )
+    visibility_normalization = args.visibility_normalization or ckpt_args.get("visibility_normalization", "none")
     target_is_noisy = args.target_is_noisy or bool(ckpt_args.get("target_is_noisy", False))
     objective_kwargs = {
         "beta_kl": float(ckpt_args.get("beta_kl", 1e-3)),
@@ -128,6 +136,8 @@ def main() -> None:
         input_suffix=input_suffix,
         target_suffix=target_suffix,
         include_virtual_context=include_virtual_context,
+        context_expand_id=None if context_expand_id is None else int(context_expand_id),
+        visibility_normalization=visibility_normalization,
     )
     loader = DataLoader(
         dataset,
