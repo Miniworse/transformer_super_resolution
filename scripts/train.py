@@ -232,8 +232,12 @@ def main() -> None:
     parser.add_argument("--lambda-energy-orig", type=float, default=0.5)
     parser.add_argument("--lambda-energy-virtual", type=float, default=0.5)
     parser.add_argument("--lambda-phase", type=float, default=0.1)
-    parser.add_argument("--lambda-phase-expanded", type=float, default=0.0)
-    parser.add_argument("--lambda-expanded-nmse", type=float, default=0.0)
+    parser.add_argument("--lambda-phase-expanded", type=float, default=1.0)
+    parser.add_argument("--lambda-amp-all", type=float, default=0.05)
+    parser.add_argument("--lambda-amp-expanded", type=float, default=0.2)
+    parser.add_argument("--lambda-expanded-nmse", type=float, default=0.5)
+    parser.add_argument("--lambda-expanded-corr", type=float, default=0.3)
+    parser.add_argument("--lambda-uncertainty-calibration", type=float, default=0.02)
     parser.add_argument("--freq-alpha", type=float, default=2.0)
     parser.add_argument("--freq-gamma", type=float, default=1.0)
     parser.add_argument("--num-radial-bins", type=int, default=8)
@@ -314,7 +318,11 @@ def main() -> None:
         "lambda_energy_virtual": args.lambda_energy_virtual,
         "lambda_phase": args.lambda_phase,
         "lambda_phase_expanded": args.lambda_phase_expanded,
+        "lambda_amp_all": args.lambda_amp_all,
+        "lambda_amp_expanded": args.lambda_amp_expanded,
         "lambda_expanded_nmse": args.lambda_expanded_nmse,
+        "lambda_expanded_corr": args.lambda_expanded_corr,
+        "lambda_uncertainty_calibration": args.lambda_uncertainty_calibration,
         "freq_alpha": args.freq_alpha,
         "freq_gamma": args.freq_gamma,
         "num_radial_bins": args.num_radial_bins,

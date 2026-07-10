@@ -8,6 +8,8 @@ from .model import (
     VisibilityRegionInput,
     apply_context_dropout,
     build_visibility_region_inputs,
+    complex_amplitude_loss,
+    complex_correlation_loss,
     complex_gaussian_nll,
     complex_energy_loss,
     complex_phase_loss,
@@ -20,6 +22,7 @@ from .model import (
     radial_frequency_weights,
     srdata_path,
     training_objective,
+    uncertainty_calibration_loss,
     visibility_physical_objective,
     visibility_collate_fn,
 )
@@ -32,6 +35,8 @@ __all__ = [
     "VisibilityRegionInput",
     "apply_context_dropout",
     "build_visibility_region_inputs",
+    "complex_amplitude_loss",
+    "complex_correlation_loss",
     "complex_gaussian_nll",
     "complex_energy_loss",
     "complex_phase_loss",
@@ -44,6 +49,7 @@ __all__ = [
     "radial_frequency_weights",
     "srdata_path",
     "training_objective",
+    "uncertainty_calibration_loss",
     "visibility_physical_objective",
     "visibility_collate_fn",
 ]

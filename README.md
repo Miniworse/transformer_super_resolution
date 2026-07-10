@@ -52,6 +52,10 @@ V_hat_obs = V_obs + delta
 
 Expanded-only uv points are still predicted as query values.
 
+The likelihood is a circular complex Gaussian NLL. The model predicts one
+complex variance per token, shared by real and imaginary components, and the
+NLL is based on `|V_target - V_pred|^2`.
+
 ## Install
 
 Install PyTorch for your CUDA/CPU environment first, then:
@@ -221,6 +225,22 @@ hermitian
 energy
 energy_original
 energy_virtual
+amplitude
+amplitude_all
+amplitude_original
+amplitude_virtual
+amplitude_expanded_only
+expanded_nmse_loss
+expanded_radial_nmse_loss
+expanded_corr_loss
+sr_structure
+phase
+phase_original
+phase_virtual
+phase_expanded_only
+phase_loss
+uncertainty_calibration
+calibration
 kl
 noise_prior
 ```
@@ -241,6 +261,13 @@ lambda_radial_bins = 0.0
 lambda_sym = 0.0
 lambda_energy_orig = 0.5
 lambda_energy_virtual = 0.5
+lambda_phase = 0.1
+lambda_phase_expanded = 1.0
+lambda_amp_all = 0.05
+lambda_amp_expanded = 0.2
+lambda_expanded_nmse = 0.5
+lambda_expanded_corr = 0.3
+lambda_uncertainty_calibration = 0.02
 freq_alpha = 2.0
 freq_gamma = 1.0
 num_radial_bins = 8
@@ -251,3 +278,12 @@ before emphasizing expanded-only uv prediction.
 
 The radial-bin term is still available with `--lambda-radial-bins`, but it is
 disabled by default because it was too aggressive in the latest run.
+
+The phase term uses an amplitude-weighted wrapped phase error,
+`1 - cos(angle(V_pred) - angle(V_target))`, so near-zero visibility points do
+not dominate the loss with poorly defined phase.
+
+Amplitude is now split between the full supervised region and expanded-only
+tokens. The expanded-only branch also logs normalized MSE, radial-bin normalized
+MSE, complex correlation loss, and variance calibration so the transformer can
+serve as a sharper and better-calibrated diffusion conditioner.

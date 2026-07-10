@@ -603,23 +603,46 @@ def complex_energy_loss(pred_values: Tensor, target_values: Tensor, mask: Tensor
     return (pred_energy / target_energy - 1.0).abs()
 
 
+def complex_amplitude_loss(pred_values: Tensor, target_values: Tensor, mask: Tensor) -> Tensor:
+    """Relative L1 amplitude loss in a masked complex visibility region."""
+    if mask.sum() == 0:
+        return pred_values.new_zeros(())
+    weights = mask.to(pred_values.dtype)
+    pred_amp = torch.linalg.norm(pred_values, dim=-1)
+    target_amp = torch.linalg.norm(target_values, dim=-1)
+    numerator = ((pred_amp - target_amp).abs() * weights).sum()
+    denominator = (target_amp * weights).sum().clamp_min(1e-8)
+    return numerator / denominator
+
+
 def complex_normalized_mse(
     pred_values: Tensor,
     target_values: Tensor,
     mask: Tensor,
     weight: Optional[Tensor] = None,
 ) -> Tensor:
-    """Complex MSE normalized by target power in a masked region."""
+    """Complex MSE normalized by target complex power in a masked region."""
     if mask.sum() == 0:
         return pred_values.new_zeros(())
     weights = mask.to(pred_values.dtype)
     if weight is not None:
         weights = weights * weight.to(pred_values.dtype)
-    squared_error = (pred_values - target_values).pow(2).sum(dim=-1)
-    target_power = target_values.pow(2).sum(dim=-1)
-    numerator = (squared_error * weights).sum()
-    denominator = (target_power * weights).sum().clamp_min(1e-8)
-    return numerator / denominator
+    component_weights = weights.unsqueeze(-1)
+    diff_power = ((pred_values - target_values).pow(2) * component_weights).sum()
+    target_power = (target_values.pow(2) * component_weights).sum().clamp_min(1e-8)
+    return diff_power / target_power
+
+
+def complex_correlation_loss(pred_values: Tensor, target_values: Tensor, mask: Tensor) -> Tensor:
+    """One minus normalized real-vector correlation over complex visibility components."""
+    if mask.sum() == 0:
+        return pred_values.new_zeros(())
+    weights = mask.unsqueeze(-1).to(pred_values.dtype)
+    pred = pred_values * weights
+    target = target_values * weights
+    numerator = (pred * target).sum()
+    denominator = pred.pow(2).sum().sqrt() * target.pow(2).sum().sqrt()
+    return 1.0 - numerator / denominator.clamp_min(1e-8)
 
 
 def complex_phase_loss(
@@ -641,6 +664,18 @@ def complex_phase_loss(
     return (phase_error * phase_weight).sum() / phase_weight.sum().clamp_min(1e-8)
 
 
+def uncertainty_calibration_loss(output: BVTOutput, target_values: Tensor, mask: Tensor) -> Tensor:
+    """Match predicted complex variance to realized squared complex error."""
+    if mask.sum() == 0:
+        return output.clean_mean.new_zeros(())
+    error_power = (output.clean_mean.detach() - target_values).pow(2).sum(dim=-1).clamp_min(1e-10)
+    predicted_var = torch.exp(output.clean_logvar).squeeze(-1).clamp_min(1e-10)
+    log_error = torch.log(error_power)
+    log_var = torch.log(predicted_var)
+    weights = mask.to(output.clean_mean.dtype)
+    return ((log_var - log_error).pow(2) * weights).sum() / weights.sum().clamp_min(1.0)
+
+
 def visibility_physical_objective(
     output: BVTOutput,
     batch: VisibilityRegionInput,
@@ -656,8 +691,12 @@ def visibility_physical_objective(
     lambda_energy_orig: float = 0.5,
     lambda_energy_virtual: float = 0.5,
     lambda_phase: float = 0.1,
-    lambda_phase_expanded: float = 0.0,
-    lambda_expanded_nmse: float = 0.0,
+    lambda_phase_expanded: float = 1.0,
+    lambda_amp_all: float = 0.05,
+    lambda_amp_expanded: float = 0.2,
+    lambda_expanded_nmse: float = 0.5,
+    lambda_expanded_corr: float = 0.3,
+    lambda_uncertainty_calibration: float = 0.02,
     freq_alpha: float = 2.0,
     freq_gamma: float = 1.0,
     num_radial_bins: int = 8,
@@ -694,6 +733,10 @@ def visibility_physical_objective(
     sym = hermitian_symmetry_loss(output.clean_mean, batch.coords, batch.token_mask, symmetry_tolerance)
     energy_orig = complex_energy_loss(output.clean_mean, batch.target_values, batch.original_mask)
     energy_virtual = complex_energy_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
+    amp_all = complex_amplitude_loss(output.clean_mean, batch.target_values, batch.target_mask)
+    amp_orig = complex_amplitude_loss(output.clean_mean, batch.target_values, batch.original_mask)
+    amp_virtual = complex_amplitude_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
+    amp_expanded = complex_amplitude_loss(output.clean_mean, batch.target_values, expanded_mask)
     expanded_nmse = complex_normalized_mse(output.clean_mean, batch.target_values, expanded_mask)
     expanded_radial_nmse = complex_normalized_mse(
         output.clean_mean,
@@ -701,6 +744,8 @@ def visibility_physical_objective(
         expanded_mask,
         weight=radial_bin_weights,
     )
+    expanded_corr = complex_correlation_loss(output.clean_mean, batch.target_values, expanded_mask)
+    uncertainty_cal = uncertainty_calibration_loss(output, batch.target_values, expanded_mask)
     phase = complex_phase_loss(output.clean_mean, batch.target_values, batch.target_mask)
     phase_orig = complex_phase_loss(output.clean_mean, batch.target_values, batch.original_mask)
     phase_virtual = complex_phase_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
@@ -714,9 +759,21 @@ def visibility_physical_objective(
         + lambda_radial_bins * nll_radial_bins
     )
     energy = lambda_energy_orig * energy_orig + lambda_energy_virtual * energy_virtual
-    sr_mean_loss = lambda_expanded_nmse * expanded_radial_nmse
+    amplitude = lambda_amp_all * amp_all + lambda_amp_expanded * amp_expanded
+    sr_structure = lambda_expanded_nmse * expanded_radial_nmse + lambda_expanded_corr * expanded_corr
     phase_loss = lambda_phase * phase + lambda_phase_expanded * phase_expanded
-    loss = region_nll + lambda_sym * sym + energy + sr_mean_loss + phase_loss + beta_kl * kl + beta_noise_prior * noise_prior
+    calibration = lambda_uncertainty_calibration * uncertainty_cal
+    loss = (
+        region_nll
+        + lambda_sym * sym
+        + energy
+        + amplitude
+        + sr_structure
+        + phase_loss
+        + calibration
+        + beta_kl * kl
+        + beta_noise_prior * noise_prior
+    )
     metrics = {
         "loss": loss.detach(),
         "region_nll": region_nll.detach(),
@@ -729,14 +786,22 @@ def visibility_physical_objective(
         "energy": energy.detach(),
         "energy_original": energy_orig.detach(),
         "energy_virtual": energy_virtual.detach(),
+        "amplitude": amplitude.detach(),
+        "amplitude_all": amp_all.detach(),
+        "amplitude_original": amp_orig.detach(),
+        "amplitude_virtual": amp_virtual.detach(),
+        "amplitude_expanded_only": amp_expanded.detach(),
         "expanded_nmse_loss": expanded_nmse.detach(),
         "expanded_radial_nmse_loss": expanded_radial_nmse.detach(),
-        "sr_mean_loss": sr_mean_loss.detach(),
+        "expanded_corr_loss": expanded_corr.detach(),
+        "sr_structure": sr_structure.detach(),
         "phase": phase.detach(),
         "phase_original": phase_orig.detach(),
         "phase_virtual": phase_virtual.detach(),
         "phase_expanded_only": phase_expanded.detach(),
         "phase_loss": phase_loss.detach(),
+        "uncertainty_calibration": uncertainty_cal.detach(),
+        "calibration": calibration.detach(),
         "kl": kl.detach(),
         "noise_prior": noise_prior.detach(),
     }
