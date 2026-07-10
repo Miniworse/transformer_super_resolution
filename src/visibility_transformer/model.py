@@ -880,10 +880,20 @@ def align_visibility_to_target_uv(
     if target_coords.shape[0] != original_mask.shape[0]:
         raise ValueError("target_uv and target_original_mask must have the same token count.")
 
-    source_by_uv = {_uv_key(coord): source_values[index] for index, coord in enumerate(source_coords)}
+    target_indices = torch.where(original_mask)[0]
     aligned = torch.zeros_like(target_coords)
+    if source_coords.shape[0] == target_indices.numel():
+        ordered_target_coords = target_coords[target_indices]
+        max_order_delta = (source_coords - ordered_target_coords).abs().amax()
+        # Some srdata uv files regenerate the same original support with tiny
+        # trig/rounding differences, so exact coordinate keys are too brittle.
+        if max_order_delta <= 1e-2:
+            aligned[target_indices] = source_values
+            return aligned
+
+    source_by_uv = {_uv_key(coord): source_values[index] for index, coord in enumerate(source_coords)}
     missing = 0
-    for target_index in torch.where(original_mask)[0].tolist():
+    for target_index in target_indices.tolist():
         value = source_by_uv.get(_uv_key(target_coords[target_index]))
         if value is None:
             missing += 1
