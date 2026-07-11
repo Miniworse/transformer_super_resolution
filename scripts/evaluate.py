@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import pickle
 import sys
@@ -54,6 +55,7 @@ def create_model_from_args(ckpt_args: dict):
         "num_heads": int(ckpt_args.get("num_heads", 8)),
         "num_frequencies": int(ckpt_args.get("num_frequencies", 16)),
         "normalize_coords": bool(ckpt_args.get("normalize_coords", False)),
+        "use_gram_prior": bool(ckpt_args.get("use_gram_prior", False)),
         "dropout": float(ckpt_args.get("dropout", 0.1)),
     }
     architecture = ckpt_args.get("architecture", "encoder")
@@ -128,6 +130,10 @@ def main() -> None:
         if args.include_virtual_context is None
         else args.include_virtual_context
     )
+    use_gram_prior = bool(ckpt_args.get("use_gram_prior", False))
+    gram_top_k = int(ckpt_args.get("gram_top_k", 32))
+    gram_image_half_angle_deg = float(ckpt_args.get("gram_image_half_angle_deg", 4.0))
+    gram_min_corr = float(ckpt_args.get("gram_min_corr", 0.0))
 
     dataset = SRVisibilityDataset(
         data_root,
@@ -138,6 +144,10 @@ def main() -> None:
         include_virtual_context=include_virtual_context,
         context_expand_id=None if context_expand_id is None else int(context_expand_id),
         visibility_normalization=visibility_normalization,
+        use_gram_prior=use_gram_prior,
+        gram_top_k=gram_top_k,
+        gram_image_half_width=math.sin(math.radians(gram_image_half_angle_deg)),
+        gram_min_corr=gram_min_corr,
     )
     loader = DataLoader(
         dataset,
@@ -160,7 +170,14 @@ def main() -> None:
         first_pred = None
         for batch in loader:
             batch = move_batch(batch, device)
-            out = model(batch.values, batch.coords, batch.known_mask, batch.redundancy, batch.token_mask)
+            out = model(
+                batch.values,
+                batch.coords,
+                batch.known_mask,
+                batch.redundancy,
+                batch.token_mask,
+                batch.gram_context_values,
+            )
             loss, loss_metrics = visibility_physical_objective(
                 out,
                 batch,

@@ -22,6 +22,7 @@ from visibility_transformer import (  # noqa: E402
     SRVisibilityDataset,
     VisibilityRegionInput,
     apply_context_dropout,
+    gram_neighbor_context_values,
     visibility_physical_objective,
     visibility_collate_fn,
 )
@@ -45,6 +46,7 @@ def move_batch(batch: VisibilityRegionInput, device: torch.device) -> Visibility
         original_mask=batch.original_mask.to(device),
         virtual_mask=batch.virtual_mask.to(device),
         visibility_scale=batch.visibility_scale.to(device),
+        gram_context_values=batch.gram_context_values.to(device),
     )
 
 
@@ -134,6 +136,7 @@ def create_model(args: argparse.Namespace):
         "num_heads": args.num_heads,
         "num_frequencies": args.num_frequencies,
         "normalize_coords": args.normalize_coords,
+        "use_gram_prior": args.use_gram_prior,
         "dropout": args.dropout,
     }
     if args.architecture == "encoder":
@@ -189,7 +192,14 @@ def evaluate(
     with torch.no_grad():
         for batch in loader:
             batch = move_batch(batch, device)
-            out = model(batch.values, batch.coords, batch.known_mask, batch.redundancy, batch.token_mask)
+            out = model(
+                batch.values,
+                batch.coords,
+                batch.known_mask,
+                batch.redundancy,
+                batch.token_mask,
+                batch.gram_context_values,
+            )
             loss, loss_metrics = visibility_physical_objective(
                 out,
                 batch,
@@ -215,6 +225,10 @@ def main() -> None:
     parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--context-expand-id", type=int, default=None)
     parser.add_argument("--visibility-normalization", choices=["none", "original-rms"], default="none")
+    parser.add_argument("--use-gram-prior", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--gram-top-k", type=int, default=32)
+    parser.add_argument("--gram-image-half-angle-deg", type=float, default=4.0)
+    parser.add_argument("--gram-min-corr", type=float, default=0.0)
     parser.add_argument("--expand-ids", default="0,1,2,3,4")
     parser.add_argument("--train-scenes", default="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,"
                         "21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,"
@@ -280,6 +294,10 @@ def main() -> None:
         include_virtual_context=args.include_virtual_context,
         context_expand_id=args.context_expand_id,
         visibility_normalization=args.visibility_normalization,
+        use_gram_prior=args.use_gram_prior,
+        gram_top_k=args.gram_top_k,
+        gram_image_half_width=math.sin(math.radians(args.gram_image_half_angle_deg)),
+        gram_min_corr=args.gram_min_corr,
     )
     val_dataset = SRVisibilityDataset(
         args.data_root,
@@ -290,6 +308,10 @@ def main() -> None:
         include_virtual_context=args.include_virtual_context,
         context_expand_id=args.context_expand_id,
         visibility_normalization=args.visibility_normalization,
+        use_gram_prior=args.use_gram_prior,
+        gram_top_k=args.gram_top_k,
+        gram_image_half_width=math.sin(math.radians(args.gram_image_half_angle_deg)),
+        gram_min_corr=args.gram_min_corr,
     )
 
     train_loader = DataLoader(
@@ -344,7 +366,18 @@ def main() -> None:
         for batch in train_loader:
             batch = move_batch(batch, device)
             values, known_mask = apply_context_dropout(batch.values, batch.known_mask, args.context_dropout)
-            out = model(values, batch.coords, known_mask, batch.redundancy, batch.token_mask)
+            gram_context_values = batch.gram_context_values
+            if args.use_gram_prior and args.context_dropout > 0.0:
+                gram_context_values = gram_neighbor_context_values(
+                    batch.coords,
+                    values,
+                    known_mask,
+                    batch.token_mask,
+                    top_k=args.gram_top_k,
+                    image_half_width=math.sin(math.radians(args.gram_image_half_angle_deg)),
+                    min_corr=args.gram_min_corr,
+                )
+            out = model(values, batch.coords, known_mask, batch.redundancy, batch.token_mask, gram_context_values)
             loss, loss_metrics = visibility_physical_objective(
                 out,
                 batch,
@@ -375,7 +408,14 @@ def main() -> None:
             model.eval()
             with torch.no_grad():
                 sample = move_batch(next(iter(val_loader)), device)
-                out = model(sample.values, sample.coords, sample.known_mask, sample.redundancy, sample.token_mask)
+                out = model(
+                    sample.values,
+                    sample.coords,
+                    sample.known_mask,
+                    sample.redundancy,
+                    sample.token_mask,
+                    sample.gram_context_values,
+                )
                 fig = make_uv_figure(sample, out.clean_mean)
                 writer.add_figure("val/uv_amplitude", fig, epoch)
 

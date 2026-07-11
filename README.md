@@ -303,3 +303,26 @@ Amplitude is now split between the full supervised region and expanded-only
 tokens. The expanded-only branch also logs normalized MSE, radial-bin normalized
 MSE, complex correlation loss, and variance calibration so the transformer can
 serve as a sharper and better-calibrated diffusion conditioner.
+
+## PSF / Gram Prior
+
+The fixed uv distribution defines a fixed Fourier-column Gram/PSF correlation.
+Enable a soft version of this prior with:
+
+```powershell
+python scripts/train.py `
+  --data-root srdata/srdata16Juin/interval5_AMtown01 `
+  --input-suffix noised_1 `
+  --target-suffix unnoised `
+  --architecture encoder-decoder `
+  --use-gram-prior `
+  --gram-top-k 32 `
+  --run-dir runs/bvt_gram_prior
+```
+
+For each uv token, the loader computes a top-k Gram-weighted average of visible
+original visibility values. Expanded uv tokens receive this as a physical first
+guess, while original uv tokens receive neighbor context with self-copies
+excluded. The model treats it as an input feature, not a hard equality
+constraint, so many expanded uv points should guide attention without forcing
+the predictions to collapse to the same value.

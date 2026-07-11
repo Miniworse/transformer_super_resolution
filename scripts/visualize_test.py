@@ -47,6 +47,7 @@ def create_model_from_args(ckpt_args: dict):
         "num_heads": int(ckpt_args.get("num_heads", 8)),
         "num_frequencies": int(ckpt_args.get("num_frequencies", 16)),
         "normalize_coords": bool(ckpt_args.get("normalize_coords", False)),
+        "use_gram_prior": bool(ckpt_args.get("use_gram_prior", False)),
         "dropout": float(ckpt_args.get("dropout", 0.1)),
     }
     architecture = ckpt_args.get("architecture", "encoder")
@@ -271,6 +272,7 @@ def main() -> None:
         if args.include_virtual_context is None
         else args.include_virtual_context
     )
+    use_gram_prior = bool(ckpt_args.get("use_gram_prior", False))
 
     dataset = SRVisibilityDataset(
         data_root,
@@ -281,6 +283,10 @@ def main() -> None:
         include_virtual_context=include_virtual_context,
         context_expand_id=None if context_expand_id is None else int(context_expand_id),
         visibility_normalization=visibility_normalization,
+        use_gram_prior=use_gram_prior,
+        gram_top_k=int(ckpt_args.get("gram_top_k", 32)),
+        gram_image_half_width=math.sin(math.radians(float(ckpt_args.get("gram_image_half_angle_deg", 4.0)))),
+        gram_min_corr=float(ckpt_args.get("gram_min_corr", 0.0)),
     )
     batch = dataset[0]
 
@@ -298,6 +304,7 @@ def main() -> None:
             device_batch.known_mask,
             device_batch.redundancy,
             device_batch.token_mask,
+            device_batch.gram_context_values,
         )
 
     batch_cpu = move_batch(device_batch, torch.device("cpu"))
