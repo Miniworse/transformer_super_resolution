@@ -76,6 +76,49 @@ class BVTOutput:
         return torch.log(clean_var + noise_var + 1e-8)
 
 
+def conjugate_real_imag(values: Tensor) -> Tensor:
+    """Return the real/imag representation of the complex conjugate."""
+    return torch.stack([values[..., 0], -values[..., 1]], dim=-1)
+
+
+def hermitian_symmetrize_complex_values(
+    values: Tensor,
+    coords: Tensor,
+    token_mask: Optional[Tensor],
+    tolerance: float = 1e-4,
+) -> Tensor:
+    """Project complex values onto V(-u, -v) = conj(V(u, v)).
+
+    The projection is applied only to valid tokens that have a matching
+    conjugate uv partner inside ``tolerance``. Self-conjugate zero-baseline
+    tokens are projected to real values by construction.
+    """
+    projected = values.clone()
+    batch_size = values.shape[0]
+    for batch_idx in range(batch_size):
+        if token_mask is None:
+            valid = torch.ones(values.shape[1], device=values.device, dtype=torch.bool)
+        else:
+            valid = token_mask[batch_idx].bool()
+        if valid.sum() == 0:
+            continue
+
+        valid_indices = torch.where(valid)[0]
+        uv = coords[batch_idx, valid, :2]
+        distance = torch.cdist(uv, -uv)
+        min_distance, pair_index = distance.min(dim=1)
+        pair_mask = min_distance <= tolerance
+        if pair_mask.sum() == 0:
+            continue
+
+        source_index = valid_indices[pair_mask]
+        partner_index = valid_indices[pair_index[pair_mask]]
+        source_values = values[batch_idx, source_index]
+        partner_conj = conjugate_real_imag(values[batch_idx, partner_index])
+        projected[batch_idx, source_index] = 0.5 * (source_values + partner_conj)
+    return projected
+
+
 def masked_mean(x: Tensor, mask: Optional[Tensor], dim: int) -> Tensor:
     if mask is None:
         return x.mean(dim=dim)
@@ -338,6 +381,7 @@ class BayesianVisibilityTransformer(nn.Module):
 
         pred = self.head(encoded)
         clean_mean = pred[..., :2]
+        clean_mean = hermitian_symmetrize_complex_values(clean_mean, coords, token_mask)
         clean_logvar = pred[..., 2:3].clamp(-12.0, 6.0)
         noise_logvar = pred[..., 3:4].clamp(-12.0, 6.0)
 
@@ -461,6 +505,7 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             values + delta_or_value,
             delta_or_value,
         )
+        clean_mean = hermitian_symmetrize_complex_values(clean_mean, coords, token_mask)
         clean_logvar = pred[..., 2:3].clamp(-12.0, 6.0)
         noise_logvar = pred[..., 3:4].clamp(-12.0, 6.0)
 
