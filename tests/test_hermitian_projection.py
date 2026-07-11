@@ -31,3 +31,8 @@ def test_hermitian_projection_pairs_and_zero_baseline():
     assert torch.allclose(projected[0, 1], torch.stack([projected[0, 0, 0], -projected[0, 0, 1]]))
     assert projected[0, 2, 1].abs() < 1e-6
     assert torch.allclose(projected[0, 3], values[0, 3])
+
+
+if __name__ == "__main__":
+    test_hermitian_projection_pairs_and_zero_baseline()
+    print("hermitian projection assertions passed")
