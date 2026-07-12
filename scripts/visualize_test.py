@@ -48,6 +48,7 @@ def create_model_from_args(ckpt_args: dict):
         "num_frequencies": int(ckpt_args.get("num_frequencies", 16)),
         "normalize_coords": bool(ckpt_args.get("normalize_coords", False)),
         "use_gram_prior": bool(ckpt_args.get("use_gram_prior", False)),
+        "gram_prior_mode": ckpt_args.get("gram_prior_mode", "feature"),
         "dropout": float(ckpt_args.get("dropout", 0.1)),
     }
     architecture = ckpt_args.get("architecture", "encoder")

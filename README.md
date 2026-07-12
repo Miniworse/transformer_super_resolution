@@ -316,6 +316,7 @@ python scripts/train.py `
   --target-suffix unnoised `
   --architecture encoder-decoder `
   --use-gram-prior `
+  --gram-prior-mode feature `
   --gram-top-k 32 `
   --run-dir runs/bvt_gram_prior
 ```
@@ -326,3 +327,25 @@ guess, while original uv tokens receive neighbor context with self-copies
 excluded. The model treats it as an input feature, not a hard equality
 constraint, so many expanded uv points should guide attention without forcing
 the predictions to collapse to the same value.
+
+The Gram prior can also be used as a residual baseline:
+
+```powershell
+python scripts/train.py `
+  --data-root srdata/srdata25Juin `
+  --input-suffix noised_1 `
+  --target-suffix noised_0 `
+  --context-expand-id 0 `
+  --visibility-normalization original-rms `
+  --architecture encoder-decoder `
+  --use-gram-prior `
+  --gram-prior-mode residual `
+  --gram-top-k 16 `
+  --run-dir runs/bvt_gram_residual
+```
+
+In residual mode, original/known uv tokens still use the denoising residual
+path, `clean = noisy + residual`, while expanded-only query tokens use
+`clean = gram_psf_baseline + residual`. This tests whether the PSF estimate is
+a useful physical first guess for super-resolution rather than only an extra
+attention feature.

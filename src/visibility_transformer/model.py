@@ -341,10 +341,14 @@ class BayesianVisibilityTransformer(nn.Module):
         max_frequency: float = 64.0,
         normalize_coords: bool = False,
         use_gram_prior: bool = False,
+        gram_prior_mode: str = "feature",
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
+        if gram_prior_mode not in {"feature", "residual"}:
+            raise ValueError(f"Unsupported gram_prior_mode: {gram_prior_mode!r}.")
         self.use_gram_prior = use_gram_prior
+        self.gram_prior_mode = gram_prior_mode
         self.embed = VisibilityTokenEmbedder(
             coord_dim=coord_dim,
             model_dim=model_dim,
@@ -399,7 +403,15 @@ class BayesianVisibilityTransformer(nn.Module):
         encoded = encoded + z_token.unsqueeze(1)
 
         pred = self.head(encoded)
-        clean_mean = pred[..., :2]
+        delta_or_value = pred[..., :2]
+        if self.use_gram_prior and self.gram_prior_mode == "residual":
+            clean_mean = torch.where(
+                known_mask.bool().unsqueeze(-1),
+                values + delta_or_value,
+                gram_context_values + delta_or_value,
+            )
+        else:
+            clean_mean = delta_or_value
         clean_mean = hermitian_symmetrize_complex_values(clean_mean, coords, token_mask)
         clean_logvar = pred[..., 2:3].clamp(-12.0, 6.0)
         noise_logvar = pred[..., 3:4].clamp(-12.0, 6.0)
@@ -438,10 +450,14 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         max_frequency: float = 64.0,
         normalize_coords: bool = False,
         use_gram_prior: bool = False,
+        gram_prior_mode: str = "feature",
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
+        if gram_prior_mode not in {"feature", "residual"}:
+            raise ValueError(f"Unsupported gram_prior_mode: {gram_prior_mode!r}.")
         self.use_gram_prior = use_gram_prior
+        self.gram_prior_mode = gram_prior_mode
         self.context_embed = VisibilityTokenEmbedder(
             coord_dim=coord_dim,
             model_dim=model_dim,
@@ -531,10 +547,15 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
 
         pred = self.head(decoded)
         delta_or_value = pred[..., :2]
+        query_baseline = (
+            gram_context_values
+            if self.use_gram_prior and self.gram_prior_mode == "residual"
+            else torch.zeros_like(delta_or_value)
+        )
         clean_mean = torch.where(
             known_mask.bool().unsqueeze(-1),
             values + delta_or_value,
-            delta_or_value,
+            query_baseline + delta_or_value,
         )
         clean_mean = hermitian_symmetrize_complex_values(clean_mean, coords, token_mask)
         clean_logvar = pred[..., 2:3].clamp(-12.0, 6.0)

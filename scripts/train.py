@@ -137,6 +137,7 @@ def create_model(args: argparse.Namespace):
         "num_frequencies": args.num_frequencies,
         "normalize_coords": args.normalize_coords,
         "use_gram_prior": args.use_gram_prior,
+        "gram_prior_mode": args.gram_prior_mode,
         "dropout": args.dropout,
     }
     if args.architecture == "encoder":
@@ -226,6 +227,7 @@ def main() -> None:
     parser.add_argument("--context-expand-id", type=int, default=None)
     parser.add_argument("--visibility-normalization", choices=["none", "original-rms"], default="none")
     parser.add_argument("--use-gram-prior", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--gram-prior-mode", choices=["feature", "residual"], default="feature")
     parser.add_argument("--gram-top-k", type=int, default=32)
     parser.add_argument("--gram-image-half-angle-deg", type=float, default=4.0)
     parser.add_argument("--gram-min-corr", type=float, default=0.0)
