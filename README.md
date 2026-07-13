@@ -349,3 +349,49 @@ path, `clean = noisy + residual`, while expanded-only query tokens use
 `clean = gram_psf_baseline + residual`. This tests whether the PSF estimate is
 a useful physical first guess for super-resolution rather than only an extra
 attention feature.
+
+## Cross-expansion denoising and super-resolution
+
+The recommended training path keeps observed denoising and missing-coordinate
+super-resolution separate while sharing one encoder. The encoder's MLP head
+predicts a clean residual at observed source coordinates. The decoder predicts
+only target coordinates absent from that source. Their outputs are merged and
+then projected onto hard conjugate Hermitian symmetry.
+
+Training samples a lower expansion for every target expansion. The curriculum
+starts with small gaps such as `expand_3 -> expand_4`, then admits wider gaps
+including `expand_0 -> expand_10`. Validation always uses `expand_0` as the
+source so checkpoint selection measures the deployment task. The source UV
+coordinates define the observed mask; the stored redundancy vectors remain
+unchanged as physical input features.
+
+```powershell
+python scripts/train.py `
+  --data-root srdata/srdata25Juin `
+  --input-suffix noised_1 `
+  --target-suffix noised_0 `
+  --expand-ids 0,1,2,3,4,5,6,7,8,9,10 `
+  --architecture encoder-decoder `
+  --cross-expansion `
+  --cross-expansion-curriculum-epochs 30 `
+  --eval-context-expand-id 0 `
+  --visibility-normalization original-rms `
+  --use-complex-features `
+  --separate-denoising-head `
+  --use-gram-attention-bias `
+  --no-use-gram-prior `
+  --expansion-sampling-power 1.0 `
+  --selection-metric expanded-corr `
+  --lambda-orig 1.0 `
+  --lambda-virtual 0.0 `
+  --lambda-expanded 3.0 `
+  --lambda-high-freq 1.0 `
+  --epochs 70 `
+  --run-dir runs/bvt_cross_expansion
+```
+
+The value embedder receives normalized real/imaginary values together with
+`log1p(amplitude)`, `cos(phase)`, and `sin(phase)`. High target expansions are
+sampled more often, and radial-frequency loss weighting emphasizes long
+baselines. Gram/PSF correlation is an additive decoder cross-attention bias;
+it does not provide or smooth a visibility value in this configuration.

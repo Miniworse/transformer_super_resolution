@@ -11,7 +11,7 @@ from typing import Iterable
 
 import torch
 from torch import Tensor
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -138,6 +138,7 @@ def create_model(args: argparse.Namespace):
         "normalize_coords": args.normalize_coords,
         "use_gram_prior": args.use_gram_prior,
         "gram_prior_mode": args.gram_prior_mode,
+        "use_complex_features": args.use_complex_features,
         "dropout": args.dropout,
     }
     if args.architecture == "encoder":
@@ -146,6 +147,10 @@ def create_model(args: argparse.Namespace):
         return BayesianVisibilityEncoderDecoder(
             num_encoder_layers=args.num_encoder_layers,
             num_decoder_layers=args.num_decoder_layers,
+            separate_denoising_head=args.separate_denoising_head,
+            use_gram_attention_bias=args.use_gram_attention_bias,
+            gram_attention_strength=args.gram_attention_strength,
+            gram_image_half_width=math.sin(math.radians(args.gram_image_half_angle_deg)),
             **common,
         )
     raise ValueError(f"Unsupported architecture: {args.architecture}")
@@ -225,12 +230,19 @@ def main() -> None:
     parser.add_argument("--target-is-noisy", action="store_true")
     parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--context-expand-id", type=int, default=None)
-    parser.add_argument("--visibility-normalization", choices=["none", "original-rms"], default="none")
+    parser.add_argument("--eval-context-expand-id", type=int, default=0)
+    parser.add_argument("--cross-expansion", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--cross-expansion-curriculum-epochs", type=int, default=30)
+    parser.add_argument("--expansion-sampling-power", type=float, default=1.0)
+    parser.add_argument("--sampling-seed", type=int, default=0)
+    parser.add_argument("--visibility-normalization", choices=["none", "original-rms"], default="original-rms")
     parser.add_argument("--use-gram-prior", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gram-prior-mode", choices=["feature", "residual"], default="feature")
     parser.add_argument("--gram-top-k", type=int, default=32)
     parser.add_argument("--gram-image-half-angle-deg", type=float, default=4.0)
     parser.add_argument("--gram-min-corr", type=float, default=0.0)
+    parser.add_argument("--use-gram-attention-bias", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--gram-attention-strength", type=float, default=1.0)
     parser.add_argument("--expand-ids", default="0,1,2,3,4")
     parser.add_argument("--train-scenes", default="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,"
                         "21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,"
@@ -244,10 +256,10 @@ def main() -> None:
     parser.add_argument("--context-dropout", type=float, default=0.0)
     parser.add_argument("--beta-kl", type=float, default=1e-3)
     parser.add_argument("--beta-noise-prior", type=float, default=1e-4)
-    parser.add_argument("--lambda-orig", type=float, default=5.0)
-    parser.add_argument("--lambda-virtual", type=float, default=1.0)
-    parser.add_argument("--lambda-expanded", type=float, default=1.0)
-    parser.add_argument("--lambda-high-freq", type=float, default=0.5)
+    parser.add_argument("--lambda-orig", type=float, default=1.0)
+    parser.add_argument("--lambda-virtual", type=float, default=0.0)
+    parser.add_argument("--lambda-expanded", type=float, default=3.0)
+    parser.add_argument("--lambda-high-freq", type=float, default=1.0)
     parser.add_argument("--lambda-radial-bins", type=float, default=0.0)
     parser.add_argument("--lambda-sym", type=float, default=0.0)
     parser.add_argument("--lambda-energy-orig", type=float, default=0.5)
@@ -271,6 +283,8 @@ def main() -> None:
     parser.add_argument("--num-decoder-layers", type=int, default=4)
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--num-frequencies", type=int, default=16)
+    parser.add_argument("--use-complex-features", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--separate-denoising-head", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--normalize-coords", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -278,7 +292,12 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--figure-every", type=int, default=5)
     parser.add_argument("--checkpoint-every", type=int, default=0)
+    parser.add_argument("--selection-metric", choices=["expanded-rmse", "expanded-corr"], default="expanded-corr")
     args = parser.parse_args()
+    if args.cross_expansion and args.include_virtual_context:
+        parser.error("--cross-expansion requires --no-include-virtual-context to prevent target leakage.")
+    if args.use_gram_attention_bias and args.architecture != "encoder-decoder":
+        parser.error("--use-gram-attention-bias requires --architecture encoder-decoder.")
 
     from torch.utils.tensorboard import SummaryWriter
 
@@ -300,6 +319,9 @@ def main() -> None:
         gram_top_k=args.gram_top_k,
         gram_image_half_width=math.sin(math.radians(args.gram_image_half_angle_deg)),
         gram_min_corr=args.gram_min_corr,
+        cross_expansion=args.cross_expansion,
+        curriculum_epochs=args.cross_expansion_curriculum_epochs,
+        sampling_seed=args.sampling_seed,
     )
     val_dataset = SRVisibilityDataset(
         args.data_root,
@@ -308,7 +330,7 @@ def main() -> None:
         input_suffix=args.input_suffix,
         target_suffix=args.target_suffix,
         include_virtual_context=args.include_virtual_context,
-        context_expand_id=args.context_expand_id,
+        context_expand_id=args.eval_context_expand_id,
         visibility_normalization=args.visibility_normalization,
         use_gram_prior=args.use_gram_prior,
         gram_top_k=args.gram_top_k,
@@ -316,10 +338,21 @@ def main() -> None:
         gram_min_corr=args.gram_min_corr,
     )
 
+    sample_weights = [
+        train_dataset.sample_weight(index, args.expansion_sampling_power)
+        for index in range(len(train_dataset))
+    ]
+    sampler_generator = torch.Generator().manual_seed(args.sampling_seed)
+    train_sampler = WeightedRandomSampler(
+        sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True,
+        generator=sampler_generator,
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        sampler=train_sampler,
         num_workers=args.num_workers,
         collate_fn=visibility_collate_fn,
     )
@@ -337,7 +370,7 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     writer = SummaryWriter(args.run_dir / "tensorboard")
     global_step = 0
-    best_val = float("inf")
+    best_score = -float("inf")
     objective_kwargs = {
         "beta_kl": args.beta_kl,
         "beta_noise_prior": args.beta_noise_prior,
@@ -363,6 +396,7 @@ def main() -> None:
     }
 
     for epoch in range(1, args.epochs + 1):
+        train_dataset.set_epoch(epoch - 1)
         model.train()
         train_items = []
         for batch in train_loader:
@@ -421,14 +455,20 @@ def main() -> None:
                 fig = make_uv_figure(sample, out.clean_mean)
                 writer.add_figure("val/uv_amplitude", fig, epoch)
 
-        best_metric_name = "expanded_only/rmse"
+        best_metric_name = (
+            "expanded_only/corr" if args.selection_metric == "expanded-corr" else "expanded_only/rmse"
+        )
         best_metric = val_metrics.get(best_metric_name, math.nan)
         if math.isnan(best_metric):
             best_metric_name = "all/rmse"
             best_metric = val_metrics.get(best_metric_name, math.nan)
+            metric_mode = "min"
+        else:
+            metric_mode = "max" if args.selection_metric == "expanded-corr" else "min"
         if math.isnan(best_metric):
             best_metric_name = "loss"
             best_metric = val_metrics[best_metric_name]
+            metric_mode = "min"
 
         checkpoint = {
             "epoch": epoch,
@@ -442,8 +482,9 @@ def main() -> None:
         torch.save(checkpoint, args.run_dir / "checkpoints" / "last.pt")
         if args.checkpoint_every > 0 and epoch % args.checkpoint_every == 0:
             torch.save(checkpoint, args.run_dir / "checkpoints" / f"epoch_{epoch:04d}.pt")
-        if best_metric < best_val:
-            best_val = best_metric
+        selection_score = best_metric if metric_mode == "max" else -best_metric
+        if selection_score > best_score:
+            best_score = selection_score
             torch.save(checkpoint, args.run_dir / "checkpoints" / "best.pt")
 
         print(

@@ -49,6 +49,7 @@ def create_model_from_args(ckpt_args: dict):
         "normalize_coords": bool(ckpt_args.get("normalize_coords", False)),
         "use_gram_prior": bool(ckpt_args.get("use_gram_prior", False)),
         "gram_prior_mode": ckpt_args.get("gram_prior_mode", "feature"),
+        "use_complex_features": bool(ckpt_args.get("use_complex_features", False)),
         "dropout": float(ckpt_args.get("dropout", 0.1)),
     }
     architecture = ckpt_args.get("architecture", "encoder")
@@ -56,6 +57,12 @@ def create_model_from_args(ckpt_args: dict):
         return BayesianVisibilityEncoderDecoder(
             num_encoder_layers=int(ckpt_args.get("num_encoder_layers", 6)),
             num_decoder_layers=int(ckpt_args.get("num_decoder_layers", 4)),
+            separate_denoising_head=bool(ckpt_args.get("separate_denoising_head", False)),
+            use_gram_attention_bias=bool(ckpt_args.get("use_gram_attention_bias", False)),
+            gram_attention_strength=float(ckpt_args.get("gram_attention_strength", 1.0)),
+            gram_image_half_width=math.sin(
+                math.radians(float(ckpt_args.get("gram_image_half_angle_deg", 4.0)))
+            ),
             **common,
         )
     return BayesianVisibilityTransformer(num_layers=int(ckpt_args.get("num_layers", 8)), **common)
@@ -265,7 +272,7 @@ def main() -> None:
     context_expand_id = (
         args.context_expand_id
         if args.context_expand_id is not None
-        else ckpt_args.get("context_expand_id")
+        else ckpt_args.get("eval_context_expand_id", ckpt_args.get("context_expand_id"))
     )
     visibility_normalization = args.visibility_normalization or ckpt_args.get("visibility_normalization", "none")
     include_virtual_context = (

@@ -57,6 +57,16 @@ class VisibilityRegionInput:
     gram_context_values: Tensor
 
 
+def complex_visibility_features(values: Tensor, known_mask: Optional[Tensor] = None) -> Tensor:
+    """Augment real/imag values with compressed amplitude and circular phase."""
+    amplitude = torch.linalg.norm(values, dim=-1, keepdim=True)
+    unit = values / amplitude.clamp_min(1e-8)
+    features = torch.cat([values, torch.log1p(amplitude), unit], dim=-1)
+    if known_mask is not None:
+        features = features * known_mask.to(values.dtype).unsqueeze(-1)
+    return features
+
+
 @dataclass
 class BVTOutput:
     """Predictive posterior and latent Bayesian state."""
@@ -264,10 +274,12 @@ class VisibilityTokenEmbedder(nn.Module):
         max_frequency: float = 64.0,
         normalize_coords: bool = False,
         value_dim: int = 2,
+        use_complex_features: bool = False,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.coord_encoding = UVFourierEncoding(coord_dim, num_frequencies, max_frequency, normalize_coords)
+        self.use_complex_features = use_complex_features
         self.value_proj = MLP(value_dim, model_dim, model_dim, dropout)
         self.coord_proj = MLP(self.coord_encoding.out_dim, model_dim, model_dim, dropout)
         self.redundancy_proj = MLP(redundancy_dim, model_dim, model_dim, dropout)
@@ -282,6 +294,10 @@ class VisibilityTokenEmbedder(nn.Module):
         redundancy: Tensor,
         gram_context_values: Optional[Tensor] = None,
     ) -> Tensor:
+        if self.use_complex_features:
+            values = complex_visibility_features(values, known_mask)
+            if gram_context_values is not None:
+                gram_context_values = complex_visibility_features(gram_context_values)
         if gram_context_values is not None:
             values = torch.cat([values, gram_context_values], dim=-1)
         redundancy = torch.log1p(redundancy.clamp_min(0.0))
@@ -342,6 +358,7 @@ class BayesianVisibilityTransformer(nn.Module):
         normalize_coords: bool = False,
         use_gram_prior: bool = False,
         gram_prior_mode: str = "feature",
+        use_complex_features: bool = False,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
@@ -356,7 +373,8 @@ class BayesianVisibilityTransformer(nn.Module):
             num_frequencies=num_frequencies,
             max_frequency=max_frequency,
             normalize_coords=normalize_coords,
-            value_dim=4 if use_gram_prior else 2,
+            value_dim=(5 if use_complex_features else 2) * (2 if use_gram_prior else 1),
+            use_complex_features=use_complex_features,
             dropout=dropout,
         )
 
@@ -451,6 +469,11 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         normalize_coords: bool = False,
         use_gram_prior: bool = False,
         gram_prior_mode: str = "feature",
+        use_complex_features: bool = False,
+        separate_denoising_head: bool = False,
+        use_gram_attention_bias: bool = False,
+        gram_attention_strength: float = 1.0,
+        gram_image_half_width: float = math.sin(math.radians(4.0)),
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
@@ -458,6 +481,12 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             raise ValueError(f"Unsupported gram_prior_mode: {gram_prior_mode!r}.")
         self.use_gram_prior = use_gram_prior
         self.gram_prior_mode = gram_prior_mode
+        self.separate_denoising_head = separate_denoising_head
+        self.use_gram_attention_bias = use_gram_attention_bias
+        self.gram_attention_strength = gram_attention_strength
+        self.gram_image_half_width = gram_image_half_width
+        self.num_heads = num_heads
+        value_dim = (5 if use_complex_features else 2) * (2 if use_gram_prior else 1)
         self.context_embed = VisibilityTokenEmbedder(
             coord_dim=coord_dim,
             model_dim=model_dim,
@@ -465,7 +494,8 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             num_frequencies=num_frequencies,
             max_frequency=max_frequency,
             normalize_coords=normalize_coords,
-            value_dim=4 if use_gram_prior else 2,
+            value_dim=value_dim,
+            use_complex_features=use_complex_features,
             dropout=dropout,
         )
         self.query_embed = VisibilityTokenEmbedder(
@@ -475,7 +505,8 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             num_frequencies=num_frequencies,
             max_frequency=max_frequency,
             normalize_coords=normalize_coords,
-            value_dim=4 if use_gram_prior else 2,
+            value_dim=value_dim,
+            use_complex_features=use_complex_features,
             dropout=dropout,
         )
 
@@ -507,6 +538,15 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(model_dim, 4),
         )
+        self.denoising_head = None
+        if separate_denoising_head:
+            self.denoising_head = nn.Sequential(
+                nn.LayerNorm(model_dim),
+                nn.Linear(model_dim, model_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(model_dim, 4),
+            )
 
     def forward(
         self,
@@ -538,28 +578,44 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
 
         query_values = values.masked_fill(~known_mask.bool().unsqueeze(-1), 0.0)
         query_tokens = self.query_embed(query_values, coords, known_mask.bool(), redundancy, gram_context_values)
+        memory_mask = None
+        if self.use_gram_attention_bias:
+            gram_corr = fourier_column_correlation(
+                coords[..., :2],
+                coords[..., :2],
+                self.gram_image_half_width,
+            )
+            memory_mask = self.gram_attention_strength * torch.log(gram_corr.clamp_min(1e-6))
+            memory_mask = memory_mask.repeat_interleave(self.num_heads, dim=0)
         decoded = self.decoder(
             query_tokens,
             memory,
             tgt_key_padding_mask=~token_mask.bool(),
             memory_key_padding_mask=memory_key_padding_mask,
+            memory_mask=memory_mask,
         )
 
-        pred = self.head(decoded)
-        delta_or_value = pred[..., :2]
+        expansion_pred = self.head(decoded)
+        denoising_pred = self.denoising_head(memory) if self.denoising_head is not None else expansion_pred
+        delta_or_value = expansion_pred[..., :2]
         query_baseline = (
             gram_context_values
             if self.use_gram_prior and self.gram_prior_mode == "residual"
             else torch.zeros_like(delta_or_value)
         )
-        clean_mean = torch.where(
-            known_mask.bool().unsqueeze(-1),
-            values + delta_or_value,
-            query_baseline + delta_or_value,
-        )
+        observed_mean = values + denoising_pred[..., :2]
+        clean_mean = torch.where(known_mask.bool().unsqueeze(-1), observed_mean, query_baseline + delta_or_value)
         clean_mean = hermitian_symmetrize_complex_values(clean_mean, coords, token_mask)
-        clean_logvar = pred[..., 2:3].clamp(-12.0, 6.0)
-        noise_logvar = pred[..., 3:4].clamp(-12.0, 6.0)
+        clean_logvar = torch.where(
+            known_mask.bool().unsqueeze(-1),
+            denoising_pred[..., 2:3],
+            expansion_pred[..., 2:3],
+        ).clamp(-12.0, 6.0)
+        noise_logvar = torch.where(
+            known_mask.bool().unsqueeze(-1),
+            denoising_pred[..., 3:4],
+            expansion_pred[..., 3:4],
+        ).clamp(-12.0, 6.0)
 
         return BVTOutput(
             clean_mean=clean_mean,
@@ -1001,6 +1057,32 @@ def align_visibility_to_target_uv(
     return aligned
 
 
+def align_source_visibility_to_target_uv(
+    target_uv: Tensor | object,
+    source_uv: Tensor | object,
+    source_visibility: Tensor | object,
+    tolerance: float = 1e-2,
+) -> tuple[Tensor, Tensor]:
+    """Align a lower-expansion observation onto a higher-expansion uv grid."""
+    target_coords = _single_visibility_array(target_uv, "target_uv")
+    source_coords = _single_visibility_array(source_uv, "source_uv")
+    source_values = _single_visibility_array(source_visibility, "source_visibility")
+    if source_coords.shape[0] != source_values.shape[0]:
+        raise ValueError("source_uv and source_visibility must have the same token count.")
+
+    distance = torch.cdist(source_coords[:, :2], target_coords[:, :2])
+    min_distance, target_indices = distance.min(dim=1)
+    if (min_distance > tolerance).any():
+        missing = int((min_distance > tolerance).sum())
+        raise ValueError(f"Could not align {missing} source uv points onto the target expansion grid.")
+
+    aligned = torch.zeros_like(target_coords)
+    observed_mask = torch.zeros(target_coords.shape[0], dtype=torch.bool)
+    aligned[target_indices] = source_values
+    observed_mask[target_indices] = True
+    return aligned, observed_mask
+
+
 def _compute_visibility_scale(
     input_values: Tensor,
     original_mask: Tensor,
@@ -1087,6 +1169,7 @@ def build_visibility_region_inputs(
     gram_top_k: int = 32,
     gram_image_half_width: float = math.sin(math.radians(4.0)),
     gram_min_corr: float = 0.0,
+    observed_support_mask: Optional[Tensor | object] = None,
 ) -> VisibilityRegionInput:
     """Pack native visibility-region arrays into the transformer's token API.
 
@@ -1128,6 +1211,14 @@ def build_visibility_region_inputs(
         raise ValueError(f"target_visibility must have shape {tuple(input_values.shape)}, got {tuple(target_values.shape)}.")
 
     original_mask = redundancy[..., 0] > 0
+    if observed_support_mask is not None:
+        original_mask = torch.as_tensor(observed_support_mask, dtype=torch.bool, device=coords.device)
+        if original_mask.ndim == 1:
+            original_mask = original_mask.unsqueeze(0)
+        if original_mask.shape != coords.shape[:2]:
+            raise ValueError(
+                f"observed_support_mask must have shape {tuple(coords.shape[:2])}, got {tuple(original_mask.shape)}."
+            )
     virtual_mask = redundancy[..., 1] > 0
 
     if valid_mask is None:
@@ -1266,6 +1357,25 @@ def load_srdata_arrays(
     provided, every token is treated as both observed and supervised, which is
     appropriate for denoising-only grids with no explicit expanded-only region.
     """
+    uv, visibility, redundancy, target_visibility, _ = _load_srdata_arrays_with_observed_mask(
+        root,
+        scene_id,
+        expand_id,
+        input_suffix=input_suffix,
+        target_suffix=target_suffix,
+        context_expand_id=context_expand_id,
+    )
+    return uv, visibility, redundancy, target_visibility
+
+
+def _load_srdata_arrays_with_observed_mask(
+    root: str | Path,
+    scene_id: int,
+    expand_id: int,
+    input_suffix: str = "unnoised",
+    target_suffix: Optional[str] = None,
+    context_expand_id: Optional[int] = None,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     target_suffix = input_suffix if target_suffix is None else target_suffix
     uv = _load_npy_from_candidates(root, "uv", scene_id, expand_id, input_suffix)
     redundancy_path = _first_existing_path(
@@ -1279,17 +1389,16 @@ def load_srdata_arrays(
     )
     if context_expand_id is None or context_expand_id == expand_id:
         visibility = _load_npy(srdata_path(root, "visibility", scene_id, expand_id, input_suffix))
+        observed_mask = _visibility_array_to_batch_last(redundancy, "redu").squeeze(0)[:, 0] > 0
     else:
         source_uv = _load_npy_from_candidates(root, "uv", scene_id, context_expand_id, input_suffix)
         source_visibility = _load_npy(srdata_path(root, "visibility", scene_id, context_expand_id, input_suffix))
-        target_redundancy = _visibility_array_to_batch_last(redundancy, "redu").squeeze(0)
-        visibility = align_visibility_to_target_uv(
+        visibility, observed_mask = align_source_visibility_to_target_uv(
             uv,
             source_uv,
             source_visibility,
-            target_redundancy[:, 0] > 0,
         )
-    return uv, visibility, redundancy, target_visibility
+    return uv, visibility, redundancy, target_visibility, observed_mask
 
 
 class SRVisibilityDataset(torch.utils.data.Dataset):
@@ -1309,6 +1418,9 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
         gram_top_k: int = 32,
         gram_image_half_width: float = math.sin(math.radians(4.0)),
         gram_min_corr: float = 0.0,
+        cross_expansion: bool = False,
+        curriculum_epochs: int = 30,
+        sampling_seed: int = 0,
     ) -> None:
         super().__init__()
         self.root = Path(root)
@@ -1321,6 +1433,10 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
         self.gram_top_k = gram_top_k
         self.gram_image_half_width = gram_image_half_width
         self.gram_min_corr = gram_min_corr
+        self.cross_expansion = cross_expansion
+        self.curriculum_epochs = max(int(curriculum_epochs), 1)
+        self.sampling_seed = int(sampling_seed)
+        self.epoch = 0
 
         scene_filter = None if scene_ids is None else set(scene_ids)
         expand_filter = None if expand_ids is None else set(expand_ids)
@@ -1348,22 +1464,59 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
             if all(item is not None and item.exists() for item in required):
                 samples.append((scene_id, expand_id))
 
+        available_by_scene: dict[int, set[int]] = {}
+        for scene_id, expand_id in samples:
+            available_by_scene.setdefault(scene_id, set()).add(expand_id)
+        if cross_expansion:
+            samples = [
+                (scene_id, target_expand_id)
+                for scene_id, target_expand_id in samples
+                if any(source_expand_id < target_expand_id for source_expand_id in available_by_scene[scene_id])
+            ]
+        self.available_expand_ids = {
+            scene_id: sorted(expand_ids_for_scene)
+            for scene_id, expand_ids_for_scene in available_by_scene.items()
+        }
         self.samples = sorted(samples)
         if not self.samples:
             raise ValueError(f"No srdata samples found in {self.root} for suffix {input_suffix!r}.")
+        expand_levels = sorted({item[1] for item in self.samples})
+        self.expand_rank = {expand_id: rank + 1 for rank, expand_id in enumerate(expand_levels)}
 
     def __len__(self) -> int:
         return len(self.samples)
 
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = max(int(epoch), 0)
+
+    def sample_weight(self, index: int, power: float = 1.0) -> float:
+        """Favor samples with wider target expansion and longer uv coverage."""
+        _, expand_id = self.samples[index]
+        return float(self.expand_rank[expand_id] ** max(power, 0.0))
+
+    def _source_expand_id(self, index: int, scene_id: int, target_expand_id: int) -> Optional[int]:
+        if not self.cross_expansion:
+            return self.context_expand_id
+        candidates = [item for item in self.available_expand_ids[scene_id] if item < target_expand_id]
+        max_possible_gap = target_expand_id - min(candidates)
+        progress = min((self.epoch + 1) / self.curriculum_epochs, 1.0)
+        max_gap = max(1, math.ceil(progress * max_possible_gap))
+        candidates = [item for item in candidates if target_expand_id - item <= max_gap]
+        generator = torch.Generator().manual_seed(
+            self.sampling_seed + self.epoch * 1_000_003 + index * 97 + scene_id
+        )
+        return candidates[int(torch.randint(len(candidates), (1,), generator=generator))]
+
     def __getitem__(self, index: int) -> VisibilityRegionInput:
         scene_id, expand_id = self.samples[index]
-        uv, visibility, redundancy, target_visibility = load_srdata_arrays(
+        context_expand_id = self._source_expand_id(index, scene_id, expand_id)
+        uv, visibility, redundancy, target_visibility, observed_mask = _load_srdata_arrays_with_observed_mask(
             self.root,
             scene_id,
             expand_id,
             input_suffix=self.input_suffix,
             target_suffix=self.target_suffix,
-            context_expand_id=self.context_expand_id,
+            context_expand_id=context_expand_id,
         )
         return build_visibility_region_inputs(
             uv,
@@ -1376,6 +1529,7 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
             gram_top_k=self.gram_top_k,
             gram_image_half_width=self.gram_image_half_width,
             gram_min_corr=self.gram_min_corr,
+            observed_support_mask=observed_mask,
         )
 
 
