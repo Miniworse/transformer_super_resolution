@@ -43,6 +43,8 @@ def test_dual_heads_and_gram_attention_receive_gradients():
         num_frequencies=2,
         use_complex_features=True,
         separate_denoising_head=True,
+        use_expanded_residual_head=True,
+        expanded_residual_start_radius=0.5,
         use_gram_attention_bias=True,
         dropout=0.0,
     )
@@ -59,6 +61,9 @@ def test_dual_heads_and_gram_attention_receive_gradients():
     assert torch.isfinite(output.clean_mean).all()
     assert model.denoising_head[-1].weight.grad is not None
     assert model.head[-1].weight.grad is not None
+    assert output.expanded_residual is not None
+    assert torch.count_nonzero(output.expanded_residual[known]) == 0
+    assert model.expanded_residual_head[-1].weight.grad is not None
     assert torch.allclose(output.clean_mean[0, 1], output.clean_mean[0, 0] * torch.tensor([1.0, -1.0]))
 
 

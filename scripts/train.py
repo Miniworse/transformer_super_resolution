@@ -148,6 +148,9 @@ def create_model(args: argparse.Namespace):
             num_encoder_layers=args.num_encoder_layers,
             num_decoder_layers=args.num_decoder_layers,
             separate_denoising_head=args.separate_denoising_head,
+            use_expanded_residual_head=args.use_expanded_residual_head,
+            expanded_residual_start_radius=args.expanded_residual_start_radius,
+            expanded_residual_radius_power=args.expanded_residual_radius_power,
             use_gram_attention_bias=args.use_gram_attention_bias,
             gram_attention_strength=args.gram_attention_strength,
             gram_image_half_width=math.sin(math.radians(args.gram_image_half_angle_deg)),
@@ -261,6 +264,8 @@ def main() -> None:
     parser.add_argument("--lambda-expanded", type=float, default=3.0)
     parser.add_argument("--lambda-high-freq", type=float, default=1.0)
     parser.add_argument("--lambda-radial-bins", type=float, default=0.0)
+    parser.add_argument("--lambda-high-freq-charbonnier", type=float, default=0.0)
+    parser.add_argument("--lambda-high-freq-phase", type=float, default=0.0)
     parser.add_argument("--lambda-sym", type=float, default=0.0)
     parser.add_argument("--lambda-energy-orig", type=float, default=0.5)
     parser.add_argument("--lambda-energy-virtual", type=float, default=0.5)
@@ -285,6 +290,10 @@ def main() -> None:
     parser.add_argument("--num-frequencies", type=int, default=16)
     parser.add_argument("--use-complex-features", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--separate-denoising-head", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--use-expanded-residual-head", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--expanded-residual-start-radius", type=float, default=0.55)
+    parser.add_argument("--expanded-residual-radius-power", type=float, default=1.0)
+    parser.add_argument("--init-checkpoint", type=Path, default=None)
     parser.add_argument("--normalize-coords", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -366,6 +375,18 @@ def main() -> None:
 
     device = torch.device(args.device)
     model = create_model(args).to(device)
+    if args.init_checkpoint is not None:
+        checkpoint = torch.load(args.init_checkpoint, map_location="cpu", weights_only=True)
+        state_dict = checkpoint.get("model", checkpoint)
+        incompatible = model.load_state_dict(state_dict, strict=False)
+        allowed_missing = {key for key in incompatible.missing_keys if key.startswith("expanded_residual_head.")}
+        unexpected = set(incompatible.unexpected_keys)
+        if unexpected or set(incompatible.missing_keys) != allowed_missing:
+            raise RuntimeError(
+                "Initial checkpoint is incompatible with the requested model. "
+                f"Missing={incompatible.missing_keys}, unexpected={incompatible.unexpected_keys}."
+            )
+        print(f"initialized from {args.init_checkpoint}; new residual parameters={sorted(allowed_missing)}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     writer = SummaryWriter(args.run_dir / "tensorboard")
@@ -379,6 +400,8 @@ def main() -> None:
         "lambda_expanded": args.lambda_expanded,
         "lambda_high_freq": args.lambda_high_freq,
         "lambda_radial_bins": args.lambda_radial_bins,
+        "lambda_high_freq_charbonnier": args.lambda_high_freq_charbonnier,
+        "lambda_high_freq_phase": args.lambda_high_freq_phase,
         "lambda_sym": args.lambda_sym,
         "lambda_energy_orig": args.lambda_energy_orig,
         "lambda_energy_virtual": args.lambda_energy_virtual,

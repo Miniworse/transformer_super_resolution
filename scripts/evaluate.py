@@ -66,6 +66,9 @@ def create_model_from_args(ckpt_args: dict):
             num_encoder_layers=int(ckpt_args.get("num_encoder_layers", 6)),
             num_decoder_layers=int(ckpt_args.get("num_decoder_layers", 4)),
             separate_denoising_head=bool(ckpt_args.get("separate_denoising_head", False)),
+            use_expanded_residual_head=bool(ckpt_args.get("use_expanded_residual_head", False)),
+            expanded_residual_start_radius=float(ckpt_args.get("expanded_residual_start_radius", 0.55)),
+            expanded_residual_radius_power=float(ckpt_args.get("expanded_residual_radius_power", 1.0)),
             use_gram_attention_bias=bool(ckpt_args.get("use_gram_attention_bias", False)),
             gram_attention_strength=float(ckpt_args.get("gram_attention_strength", 1.0)),
             gram_image_half_width=math.sin(
@@ -118,6 +121,8 @@ def main() -> None:
         "lambda_expanded": float(ckpt_args.get("lambda_expanded", 1.0)),
         "lambda_high_freq": float(ckpt_args.get("lambda_high_freq", 0.5)),
         "lambda_radial_bins": float(ckpt_args.get("lambda_radial_bins", 0.0)),
+        "lambda_high_freq_charbonnier": float(ckpt_args.get("lambda_high_freq_charbonnier", 0.0)),
+        "lambda_high_freq_phase": float(ckpt_args.get("lambda_high_freq_phase", 0.0)),
         "lambda_sym": float(ckpt_args.get("lambda_sym", 0.0)),
         "lambda_energy_orig": float(ckpt_args.get("lambda_energy_orig", 0.5)),
         "lambda_energy_virtual": float(ckpt_args.get("lambda_energy_virtual", 0.5)),

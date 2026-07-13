@@ -366,6 +366,20 @@ and target UV query tokens are concatenated, so their arrays need not share
 coordinates. The stored redundancy vectors remain unchanged as physical input
 features.
 
+For UV-only fine-detail refinement, initialize a new run from the selected
+cross-expansion checkpoint and enable the radius-gated residual decoder. Its
+output is zero at initialization, applies only to unknown query tokens beyond
+the chosen UV radius, and is supervised by deterministic complex and phase
+losses in visibility space. It does not add an image-domain operation:
+
+```powershell
+  --init-checkpoint runs/bvt_cross_expansion/checkpoints/best.pt `
+  --use-expanded-residual-head `
+  --expanded-residual-start-radius 0.55 `
+  --lambda-high-freq-charbonnier 1.0 `
+  --lambda-high-freq-phase 0.5
+```
+
 ```powershell
 python scripts/train.py `
   --data-root srdata/srdata25Juin `

@@ -78,6 +78,7 @@ class BVTOutput:
     latent_logvar: Tensor
     prior_mean: Tensor
     prior_logvar: Tensor
+    expanded_residual: Optional[Tensor] = None
 
     @property
     def total_logvar(self) -> Tensor:
@@ -471,6 +472,9 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         gram_prior_mode: str = "feature",
         use_complex_features: bool = False,
         separate_denoising_head: bool = False,
+        use_expanded_residual_head: bool = False,
+        expanded_residual_start_radius: float = 0.55,
+        expanded_residual_radius_power: float = 1.0,
         use_gram_attention_bias: bool = False,
         gram_attention_strength: float = 1.0,
         gram_image_half_width: float = math.sin(math.radians(4.0)),
@@ -479,9 +483,16 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         super().__init__()
         if gram_prior_mode not in {"feature", "residual"}:
             raise ValueError(f"Unsupported gram_prior_mode: {gram_prior_mode!r}.")
+        if not 0.0 <= expanded_residual_start_radius < 1.0:
+            raise ValueError("expanded_residual_start_radius must be in [0, 1).")
+        if expanded_residual_radius_power <= 0.0:
+            raise ValueError("expanded_residual_radius_power must be positive.")
         self.use_gram_prior = use_gram_prior
         self.gram_prior_mode = gram_prior_mode
         self.separate_denoising_head = separate_denoising_head
+        self.use_expanded_residual_head = use_expanded_residual_head
+        self.expanded_residual_start_radius = expanded_residual_start_radius
+        self.expanded_residual_radius_power = expanded_residual_radius_power
         self.use_gram_attention_bias = use_gram_attention_bias
         self.gram_attention_strength = gram_attention_strength
         self.gram_image_half_width = gram_image_half_width
@@ -547,6 +558,20 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
                 nn.Dropout(dropout),
                 nn.Linear(model_dim, 4),
             )
+        self.expanded_residual_head = None
+        if use_expanded_residual_head:
+            self.expanded_residual_head = nn.Sequential(
+                nn.LayerNorm(model_dim),
+                nn.Linear(model_dim, model_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(model_dim, 2),
+            )
+            # Starting from an existing base checkpoint must initially preserve
+            # its visibility prediction exactly; the residual then learns only
+            # where the UV-domain losses support a correction.
+            nn.init.zeros_(self.expanded_residual_head[-1].weight)
+            nn.init.zeros_(self.expanded_residual_head[-1].bias)
 
     def forward(
         self,
@@ -604,13 +629,24 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         expansion_pred = self.head(decoded)
         denoising_pred = self.denoising_head(memory) if self.denoising_head is not None else expansion_pred
         delta_or_value = expansion_pred[..., :2]
+        expanded_residual = torch.zeros_like(delta_or_value)
+        if self.expanded_residual_head is not None:
+            radius = normalized_uv_radius(coords, token_mask)
+            gate = ((radius - self.expanded_residual_start_radius) / (1.0 - self.expanded_residual_start_radius))
+            gate = gate.clamp(0.0, 1.0).pow(self.expanded_residual_radius_power)
+            gate = gate * (token_mask.bool() & ~known_mask.bool()).to(values.dtype)
+            expanded_residual = self.expanded_residual_head(decoded) * gate.unsqueeze(-1)
         query_baseline = (
             gram_context_values
             if self.use_gram_prior and self.gram_prior_mode == "residual"
             else torch.zeros_like(delta_or_value)
         )
         observed_mean = values + denoising_pred[..., :2]
-        clean_mean = torch.where(known_mask.bool().unsqueeze(-1), observed_mean, query_baseline + delta_or_value)
+        clean_mean = torch.where(
+            known_mask.bool().unsqueeze(-1),
+            observed_mean,
+            query_baseline + delta_or_value + expanded_residual,
+        )
         clean_mean = hermitian_symmetrize_complex_values(clean_mean, coords, token_mask)
         clean_logvar = torch.where(
             known_mask.bool().unsqueeze(-1),
@@ -631,6 +667,7 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             latent_logvar=latent_logvar,
             prior_mean=prior_mean,
             prior_logvar=prior_logvar,
+            expanded_residual=expanded_residual,
         )
 
 
@@ -688,6 +725,16 @@ def radial_frequency_weights(
         rho_max = masked_rho.amax(dim=1, keepdim=True)
     rho_norm = rho / rho_max.clamp_min(1e-6)
     return 1.0 + alpha * rho_norm.pow(gamma)
+
+
+def normalized_uv_radius(coords: Tensor, token_mask: Optional[Tensor]) -> Tensor:
+    """Return each valid token's uv radius relative to its sample maximum."""
+    rho = torch.linalg.norm(coords[..., :2], dim=-1)
+    if token_mask is None:
+        rho_max = rho.amax(dim=1, keepdim=True)
+    else:
+        rho_max = rho.masked_fill(~token_mask.bool(), 0.0).amax(dim=1, keepdim=True)
+    return rho / rho_max.clamp_min(1e-6)
 
 
 def radial_bin_balanced_weights(
@@ -775,6 +822,23 @@ def complex_amplitude_loss(pred_values: Tensor, target_values: Tensor, mask: Ten
     return numerator / denominator
 
 
+def complex_charbonnier_loss(
+    pred_values: Tensor,
+    target_values: Tensor,
+    mask: Tensor,
+    weight: Optional[Tensor] = None,
+    epsilon: float = 1e-3,
+) -> Tensor:
+    """Robust deterministic complex residual loss, independent of predicted variance."""
+    if mask.sum() == 0:
+        return pred_values.new_zeros(())
+    weights = mask.to(pred_values.dtype)
+    if weight is not None:
+        weights = weights * weight.to(pred_values.dtype)
+    residual = torch.sqrt((pred_values - target_values).pow(2).sum(dim=-1) + epsilon**2) - epsilon
+    return (residual * weights).sum() / weights.sum().clamp_min(1.0)
+
+
 def complex_normalized_mse(
     pred_values: Tensor,
     target_values: Tensor,
@@ -810,10 +874,13 @@ def complex_phase_loss(
     target_values: Tensor,
     mask: Tensor,
     amplitude_floor: float = 1e-6,
+    weight: Optional[Tensor] = None,
 ) -> Tensor:
     """Amplitude-weighted wrapped phase loss for complex visibility."""
     target_amp = torch.linalg.norm(target_values, dim=-1)
     phase_weight = mask.to(pred_values.dtype) * target_amp
+    if weight is not None:
+        phase_weight = phase_weight * weight.to(pred_values.dtype)
     phase_weight = phase_weight.masked_fill(target_amp <= amplitude_floor, 0.0)
     if phase_weight.sum() == 0:
         return pred_values.new_zeros(())
@@ -847,6 +914,8 @@ def visibility_physical_objective(
     lambda_expanded: float = 3.0,
     lambda_high_freq: float = 1.0,
     lambda_radial_bins: float = 0.0,
+    lambda_high_freq_charbonnier: float = 0.0,
+    lambda_high_freq_phase: float = 0.0,
     lambda_sym: float = 0.1,
     lambda_energy_orig: float = 0.5,
     lambda_energy_virtual: float = 0.5,
@@ -885,6 +954,18 @@ def visibility_physical_objective(
         expanded_mask,
         weight=radial_bin_weights,
     )
+    high_freq_charbonnier = complex_charbonnier_loss(
+        output.clean_mean,
+        batch.target_values,
+        expanded_mask,
+        weight=freq_weights,
+    )
+    high_freq_phase = complex_phase_loss(
+        output.clean_mean,
+        batch.target_values,
+        expanded_mask,
+        weight=freq_weights,
+    )
 
     kl = kl_normal(output.latent_mean, output.latent_logvar, output.prior_mean, output.prior_logvar)
     mask = batch.target_mask.to(output.noise_logvar.dtype).unsqueeze(-1)
@@ -922,6 +1003,10 @@ def visibility_physical_objective(
     amplitude = lambda_amp_all * amp_all + lambda_amp_expanded * amp_expanded
     sr_structure = lambda_expanded_nmse * expanded_radial_nmse + lambda_expanded_corr * expanded_corr
     phase_loss = lambda_phase * phase + lambda_phase_expanded * phase_expanded
+    high_freq_structure = (
+        lambda_high_freq_charbonnier * high_freq_charbonnier
+        + lambda_high_freq_phase * high_freq_phase
+    )
     calibration = lambda_uncertainty_calibration * uncertainty_cal
     loss = (
         region_nll
@@ -930,6 +1015,7 @@ def visibility_physical_objective(
         + amplitude
         + sr_structure
         + phase_loss
+        + high_freq_structure
         + calibration
         + beta_kl * kl
         + beta_noise_prior * noise_prior
@@ -942,6 +1028,9 @@ def visibility_physical_objective(
         "nll_expanded_only": nll_expanded.detach(),
         "nll_high_freq": nll_high_freq.detach(),
         "nll_radial_bins": nll_radial_bins.detach(),
+        "high_freq_charbonnier": high_freq_charbonnier.detach(),
+        "high_freq_phase": high_freq_phase.detach(),
+        "high_freq_structure": high_freq_structure.detach(),
         "hermitian": sym.detach(),
         "energy": energy.detach(),
         "energy_original": energy_orig.detach(),
