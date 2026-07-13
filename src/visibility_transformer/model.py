@@ -579,6 +579,7 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         query_values = values.masked_fill(~known_mask.bool().unsqueeze(-1), 0.0)
         query_tokens = self.query_embed(query_values, coords, known_mask.bool(), redundancy, gram_context_values)
         memory_mask = None
+        decoder_memory_key_padding_mask = memory_key_padding_mask
         if self.use_gram_attention_bias:
             gram_corr = fourier_column_correlation(
                 coords[..., :2],
@@ -587,11 +588,16 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             )
             memory_mask = self.gram_attention_strength * torch.log(gram_corr.clamp_min(1e-6))
             memory_mask = memory_mask.repeat_interleave(self.num_heads, dim=0)
+            decoder_memory_key_padding_mask = torch.zeros_like(memory_key_padding_mask, dtype=memory.dtype)
+            decoder_memory_key_padding_mask = decoder_memory_key_padding_mask.masked_fill(
+                memory_key_padding_mask,
+                float("-inf"),
+            )
         decoded = self.decoder(
             query_tokens,
             memory,
             tgt_key_padding_mask=~token_mask.bool(),
-            memory_key_padding_mask=memory_key_padding_mask,
+            memory_key_padding_mask=decoder_memory_key_padding_mask,
             memory_mask=memory_mask,
         )
 
@@ -1170,6 +1176,7 @@ def build_visibility_region_inputs(
     gram_image_half_width: float = math.sin(math.radians(4.0)),
     gram_min_corr: float = 0.0,
     observed_support_mask: Optional[Tensor | object] = None,
+    virtual_support_mask: Optional[Tensor | object] = None,
 ) -> VisibilityRegionInput:
     """Pack native visibility-region arrays into the transformer's token API.
 
@@ -1220,6 +1227,14 @@ def build_visibility_region_inputs(
                 f"observed_support_mask must have shape {tuple(coords.shape[:2])}, got {tuple(original_mask.shape)}."
             )
     virtual_mask = redundancy[..., 1] > 0
+    if virtual_support_mask is not None:
+        virtual_mask = torch.as_tensor(virtual_support_mask, dtype=torch.bool, device=coords.device)
+        if virtual_mask.ndim == 1:
+            virtual_mask = virtual_mask.unsqueeze(0)
+        if virtual_mask.shape != coords.shape[:2]:
+            raise ValueError(
+                f"virtual_support_mask must have shape {tuple(coords.shape[:2])}, got {tuple(virtual_mask.shape)}."
+            )
 
     if valid_mask is None:
         token_mask = torch.ones(coords.shape[:2], device=coords.device, dtype=torch.bool)
@@ -1401,6 +1416,56 @@ def _load_srdata_arrays_with_observed_mask(
     return uv, visibility, redundancy, target_visibility, observed_mask
 
 
+def _load_cross_expansion_arrays(
+    root: str | Path,
+    scene_id: int,
+    source_expand_id: int,
+    target_expand_id: int,
+    input_suffix: str,
+    target_suffix: Optional[str],
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Build separate source-context and target-query tokens on one union grid.
+
+    Expansion uv arrays need not be nested. Concatenating their supports keeps
+    source visibility at its own physical coordinates and lets the decoder
+    query the target expansion at its distinct coordinates.
+    """
+    clean_suffix = input_suffix if target_suffix is None else target_suffix
+    source_uv = _load_npy_from_candidates(root, "uv", scene_id, source_expand_id, input_suffix)
+    source_values = _load_npy(srdata_path(root, "visibility", scene_id, source_expand_id, input_suffix))
+    source_target = _load_npy(srdata_path(root, "visibility", scene_id, source_expand_id, clean_suffix))
+    source_redundancy_path = _first_existing_path(
+        _srdata_candidate_paths(root, "redundant", scene_id, source_expand_id, input_suffix)
+    )
+    source_redundancy = (
+        _load_npy(source_redundancy_path)
+        if source_redundancy_path is not None
+        else _synthetic_redundancy_like(source_target)
+    )
+
+    target_uv = _load_npy_from_candidates(root, "uv", scene_id, target_expand_id, input_suffix)
+    target_target = _load_npy(srdata_path(root, "visibility", scene_id, target_expand_id, clean_suffix))
+    target_redundancy_path = _first_existing_path(
+        _srdata_candidate_paths(root, "redundant", scene_id, target_expand_id, input_suffix)
+    )
+    target_redundancy = (
+        _load_npy(target_redundancy_path)
+        if target_redundancy_path is not None
+        else _synthetic_redundancy_like(target_target)
+    )
+
+    source_count = source_uv.shape[0]
+    target_count = target_uv.shape[0]
+    return (
+        torch.cat([source_uv, target_uv], dim=0),
+        torch.cat([source_values, torch.zeros_like(target_uv)], dim=0),
+        torch.cat([source_redundancy, target_redundancy], dim=0),
+        torch.cat([source_target, target_target], dim=0),
+        torch.cat([torch.ones(source_count, dtype=torch.bool), torch.zeros(target_count, dtype=torch.bool)]),
+        torch.cat([torch.zeros(source_count, dtype=torch.bool), torch.ones(target_count, dtype=torch.bool)]),
+    )
+
+
 class SRVisibilityDataset(torch.utils.data.Dataset):
     """Dataset for the simulated srdata npy triplets."""
 
@@ -1510,14 +1575,27 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
     def __getitem__(self, index: int) -> VisibilityRegionInput:
         scene_id, expand_id = self.samples[index]
         context_expand_id = self._source_expand_id(index, scene_id, expand_id)
-        uv, visibility, redundancy, target_visibility, observed_mask = _load_srdata_arrays_with_observed_mask(
-            self.root,
-            scene_id,
-            expand_id,
-            input_suffix=self.input_suffix,
-            target_suffix=self.target_suffix,
-            context_expand_id=context_expand_id,
-        )
+        virtual_mask = None
+        if self.cross_expansion:
+            if context_expand_id is None or context_expand_id >= expand_id:
+                raise RuntimeError("Cross-expansion samples require a lower source expansion.")
+            uv, visibility, redundancy, target_visibility, observed_mask, virtual_mask = _load_cross_expansion_arrays(
+                self.root,
+                scene_id,
+                context_expand_id,
+                expand_id,
+                input_suffix=self.input_suffix,
+                target_suffix=self.target_suffix,
+            )
+        else:
+            uv, visibility, redundancy, target_visibility, observed_mask = _load_srdata_arrays_with_observed_mask(
+                self.root,
+                scene_id,
+                expand_id,
+                input_suffix=self.input_suffix,
+                target_suffix=self.target_suffix,
+                context_expand_id=context_expand_id,
+            )
         return build_visibility_region_inputs(
             uv,
             visibility,
@@ -1530,6 +1608,7 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
             gram_image_half_width=self.gram_image_half_width,
             gram_min_corr=self.gram_min_corr,
             observed_support_mask=observed_mask,
+            virtual_support_mask=virtual_mask,
         )
 
 

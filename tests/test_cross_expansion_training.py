@@ -105,9 +105,10 @@ def test_cross_expansion_curriculum_uses_lower_source_support():
         dataset.set_epoch(0)
         sample = dataset[target_two_index]
 
+        assert sample.values.shape[1] == 10
         assert sample.known_mask.sum().item() == 4
         assert sample.original_mask.sum().item() == 4
-        assert (sample.virtual_mask & ~sample.original_mask).sum().item() == 2
+        assert (sample.virtual_mask & ~sample.original_mask).sum().item() == 6
 
 
 if __name__ == "__main__":

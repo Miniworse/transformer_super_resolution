@@ -361,9 +361,10 @@ then projected onto hard conjugate Hermitian symmetry.
 Training samples a lower expansion for every target expansion. The curriculum
 starts with small gaps such as `expand_3 -> expand_4`, then admits wider gaps
 including `expand_0 -> expand_10`. Validation always uses `expand_0` as the
-source so checkpoint selection measures the deployment task. The source UV
-coordinates define the observed mask; the stored redundancy vectors remain
-unchanged as physical input features.
+source so checkpoint selection measures the deployment task. Source UV tokens
+and target UV query tokens are concatenated, so their arrays need not share
+coordinates. The stored redundancy vectors remain unchanged as physical input
+features.
 
 ```powershell
 python scripts/train.py `
