@@ -116,6 +116,9 @@ def test_cross_expansion_falls_back_to_union_for_offset_grids():
         root = Path(directory)
         _write_sample(root, 0, np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
         _write_sample(root, 1, np.array([[0.5, 0.0], [1.5, 0.0]], dtype=np.float32))
+        for expand_id in [0, 1]:
+            redundancy_path = root / f"redundant_0001_expand_{expand_id}_noised_1.npy"
+            np.save(redundancy_path, np.load(redundancy_path).T)
         dataset = SRVisibilityDataset(
             root,
             scene_ids=[1],

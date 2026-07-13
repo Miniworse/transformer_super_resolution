@@ -1431,27 +1431,44 @@ def _load_cross_expansion_arrays(
     query the target expansion at its distinct coordinates.
     """
     clean_suffix = input_suffix if target_suffix is None else target_suffix
-    source_uv = _load_npy_from_candidates(root, "uv", scene_id, source_expand_id, input_suffix)
-    source_values = _load_npy(srdata_path(root, "visibility", scene_id, source_expand_id, input_suffix))
-    source_target = _load_npy(srdata_path(root, "visibility", scene_id, source_expand_id, clean_suffix))
+    source_uv = _single_visibility_array(
+        _load_npy_from_candidates(root, "uv", scene_id, source_expand_id, input_suffix),
+        "source_uv",
+    )
+    source_values = _single_visibility_array(
+        _load_npy(srdata_path(root, "visibility", scene_id, source_expand_id, input_suffix)),
+        "source_visibility",
+    )
+    source_target = _single_visibility_array(
+        _load_npy(srdata_path(root, "visibility", scene_id, source_expand_id, clean_suffix)),
+        "source_target_visibility",
+    )
     source_redundancy_path = _first_existing_path(
         _srdata_candidate_paths(root, "redundant", scene_id, source_expand_id, input_suffix)
     )
-    source_redundancy = (
+    source_redundancy = _single_visibility_array(
         _load_npy(source_redundancy_path)
         if source_redundancy_path is not None
-        else _synthetic_redundancy_like(source_target)
+        else _synthetic_redundancy_like(source_target),
+        "source_redundancy",
     )
 
-    target_uv = _load_npy_from_candidates(root, "uv", scene_id, target_expand_id, input_suffix)
-    target_target = _load_npy(srdata_path(root, "visibility", scene_id, target_expand_id, clean_suffix))
+    target_uv = _single_visibility_array(
+        _load_npy_from_candidates(root, "uv", scene_id, target_expand_id, input_suffix),
+        "target_uv",
+    )
+    target_target = _single_visibility_array(
+        _load_npy(srdata_path(root, "visibility", scene_id, target_expand_id, clean_suffix)),
+        "target_visibility",
+    )
     target_redundancy_path = _first_existing_path(
         _srdata_candidate_paths(root, "redundant", scene_id, target_expand_id, input_suffix)
     )
-    target_redundancy = (
+    target_redundancy = _single_visibility_array(
         _load_npy(target_redundancy_path)
         if target_redundancy_path is not None
-        else _synthetic_redundancy_like(target_target)
+        else _synthetic_redundancy_like(target_target),
+        "target_redundancy",
     )
 
     source_count = source_uv.shape[0]
