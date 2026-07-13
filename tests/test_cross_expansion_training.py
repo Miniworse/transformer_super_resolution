@@ -105,10 +105,30 @@ def test_cross_expansion_curriculum_uses_lower_source_support():
         dataset.set_epoch(0)
         sample = dataset[target_two_index]
 
-        assert sample.values.shape[1] == 10
+        assert sample.values.shape[1] == 6
         assert sample.known_mask.sum().item() == 4
         assert sample.original_mask.sum().item() == 4
-        assert (sample.virtual_mask & ~sample.original_mask).sum().item() == 6
+        assert (sample.virtual_mask & ~sample.original_mask).sum().item() == 2
+
+
+def test_cross_expansion_falls_back_to_union_for_offset_grids():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _write_sample(root, 0, np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
+        _write_sample(root, 1, np.array([[0.5, 0.0], [1.5, 0.0]], dtype=np.float32))
+        dataset = SRVisibilityDataset(
+            root,
+            scene_ids=[1],
+            expand_ids=[0, 1],
+            input_suffix="noised_1",
+            target_suffix="noised_0",
+            cross_expansion=True,
+        )
+        sample = dataset[0]
+
+        assert sample.values.shape[1] == 4
+        assert sample.known_mask.sum().item() == 2
+        assert (sample.virtual_mask & ~sample.original_mask).sum().item() == 2
 
 
 if __name__ == "__main__":
@@ -116,4 +136,5 @@ if __name__ == "__main__":
     test_source_uv_alignment_builds_observed_mask()
     test_dual_heads_and_gram_attention_receive_gradients()
     test_cross_expansion_curriculum_uses_lower_source_support()
+    test_cross_expansion_falls_back_to_union_for_offset_grids()
     print("cross-expansion training assertions passed")

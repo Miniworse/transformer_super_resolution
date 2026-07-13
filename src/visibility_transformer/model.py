@@ -1579,14 +1579,29 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
         if self.cross_expansion:
             if context_expand_id is None or context_expand_id >= expand_id:
                 raise RuntimeError("Cross-expansion samples require a lower source expansion.")
-            uv, visibility, redundancy, target_visibility, observed_mask, virtual_mask = _load_cross_expansion_arrays(
-                self.root,
-                scene_id,
-                context_expand_id,
-                expand_id,
-                input_suffix=self.input_suffix,
-                target_suffix=self.target_suffix,
-            )
+            try:
+                # Prefer the target grid when source coordinates are an exact
+                # subset, such as expand_3 -> expand_8.
+                uv, visibility, redundancy, target_visibility, observed_mask = _load_srdata_arrays_with_observed_mask(
+                    self.root,
+                    scene_id,
+                    expand_id,
+                    input_suffix=self.input_suffix,
+                    target_suffix=self.target_suffix,
+                    context_expand_id=context_expand_id,
+                )
+            except ValueError:
+                # Some lower expansions cover the same uv region on a shifted
+                # grid. Preserve their source coordinates as separate context
+                # tokens instead of forcing an invalid pointwise alignment.
+                uv, visibility, redundancy, target_visibility, observed_mask, virtual_mask = _load_cross_expansion_arrays(
+                    self.root,
+                    scene_id,
+                    context_expand_id,
+                    expand_id,
+                    input_suffix=self.input_suffix,
+                    target_suffix=self.target_suffix,
+                )
         else:
             uv, visibility, redundancy, target_visibility, observed_mask = _load_srdata_arrays_with_observed_mask(
                 self.root,
