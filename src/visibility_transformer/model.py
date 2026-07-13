@@ -1596,9 +1596,11 @@ class SRVisibilityDataset(torch.utils.data.Dataset):
         if self.cross_expansion:
             if context_expand_id is None or context_expand_id >= expand_id:
                 raise RuntimeError("Cross-expansion samples require a lower source expansion.")
+        if context_expand_id is not None and context_expand_id != expand_id:
             try:
                 # Prefer the target grid when source coordinates are an exact
-                # subset, such as expand_3 -> expand_8.
+                # subset, such as expand_3 -> expand_8. This also applies to
+                # fixed expand_0 validation and evaluation contexts.
                 uv, visibility, redundancy, target_visibility, observed_mask = _load_srdata_arrays_with_observed_mask(
                     self.root,
                     scene_id,

@@ -125,9 +125,9 @@ def test_cross_expansion_falls_back_to_union_for_offset_grids():
             expand_ids=[0, 1],
             input_suffix="noised_1",
             target_suffix="noised_0",
-            cross_expansion=True,
+            context_expand_id=0,
         )
-        sample = dataset[0]
+        sample = dataset[dataset.samples.index((1, 1))]
 
         assert sample.values.shape[1] == 4
         assert sample.known_mask.sum().item() == 2
