@@ -410,3 +410,40 @@ The value embedder receives normalized real/imaginary values together with
 sampled more often, and radial-frequency loss weighting emphasizes long
 baselines. Gram/PSF correlation is an additive decoder cross-attention bias;
 it does not provide or smooth a visibility value in this configuration.
+
+## Denoise-only expand_0 baseline
+
+Before mixing denoising with missing-coordinate prediction, train a same-grid
+baseline on `expand_0` only. This uses noisy visibility as context and clean
+visibility at the identical uv coordinates as target:
+
+```powershell
+python scripts/train.py `
+  --data-root srdata/srdata25Juin `
+  --input-suffix noised_1 `
+  --target-suffix noised_0 `
+  --expand-ids 0 `
+  --architecture encoder-decoder `
+  --denoise-only `
+  --no-cross-expansion `
+  --no-include-virtual-context `
+  --visibility-normalization original-rms `
+  --use-complex-features `
+  --separate-denoising-head `
+  --selection-metric denoise-rmse `
+  --lambda-orig 1.0 `
+  --lambda-virtual 0.0 `
+  --lambda-expanded 0.0 `
+  --lambda-high-freq 0.0 `
+  --lambda-energy-virtual 0.0 `
+  --lambda-phase-expanded 0.0 `
+  --lambda-amp-expanded 0.0 `
+  --lambda-expanded-nmse 0.0 `
+  --lambda-expanded-corr 0.0 `
+  --epochs 60 `
+  --run-dir runs/bvt_denoise_expand0
+```
+
+With `--denoise-only`, the objective, checkpoint selection, evaluation, and
+visualization use the original observed uv mask. `expanded_only` losses and
+metrics are not used for training or model selection.

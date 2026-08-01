@@ -88,18 +88,22 @@ def region_metrics(pred: Tensor, target: Tensor, mask: Tensor, prefix: str) -> d
     }
 
 
-def compute_metrics(batch: VisibilityRegionInput, pred: Tensor) -> dict[str, float]:
+def compute_metrics(batch: VisibilityRegionInput, pred: Tensor, denoise_only: bool = False) -> dict[str, float]:
     scale = batch.visibility_scale.to(pred.device)
     pred = pred * scale
     target = batch.target_values * scale
     expanded_only = batch.virtual_mask & ~batch.original_mask
     metrics = {}
-    for name, mask in [
-        ("all", batch.target_mask),
+    regions = [
+        ("all", batch.original_mask if denoise_only else batch.target_mask),
         ("original", batch.original_mask),
-        ("virtual", batch.virtual_mask),
-        ("expanded_only", expanded_only),
-    ]:
+    ]
+    if not denoise_only:
+        regions.extend([
+            ("virtual", batch.virtual_mask),
+            ("expanded_only", expanded_only),
+        ])
+    for name, mask in regions:
         metrics.update(region_metrics(pred, target, mask, name))
     return metrics
 
@@ -193,6 +197,7 @@ def evaluate(
     loader: DataLoader,
     device: torch.device,
     target_is_noisy: bool,
+    denoise_only: bool,
     objective_kwargs: dict[str, float],
 ) -> dict[str, float]:
     model.eval()
@@ -213,11 +218,12 @@ def evaluate(
                 out,
                 batch,
                 target_is_noisy=target_is_noisy,
+                denoise_only=denoise_only,
                 **objective_kwargs,
             )
             losses.append(float(loss.detach().cpu()))
             item = {key: float(value.cpu()) for key, value in loss_metrics.items()}
-            item.update(compute_metrics(batch, out.clean_mean))
+            item.update(compute_metrics(batch, out.clean_mean, denoise_only=denoise_only))
             metric_items.append(item)
     metrics = average_metric_dict(metric_items)
     metrics["loss"] = sum(losses) / max(len(losses), 1)
@@ -231,6 +237,7 @@ def main() -> None:
     parser.add_argument("--input-suffix", default="unnoised")
     parser.add_argument("--target-suffix", default=None)
     parser.add_argument("--target-is-noisy", action="store_true")
+    parser.add_argument("--denoise-only", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--context-expand-id", type=int, default=None)
     parser.add_argument("--eval-context-expand-id", type=int, default=0)
@@ -301,8 +308,20 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--figure-every", type=int, default=5)
     parser.add_argument("--checkpoint-every", type=int, default=0)
-    parser.add_argument("--selection-metric", choices=["expanded-rmse", "expanded-corr"], default="expanded-corr")
+    parser.add_argument(
+        "--selection-metric",
+        choices=["expanded-rmse", "expanded-corr", "denoise-rmse", "denoise-corr"],
+        default="expanded-corr",
+    )
     args = parser.parse_args()
+    if args.denoise_only and args.cross_expansion:
+        parser.error("--denoise-only cannot be combined with --cross-expansion.")
+    if args.denoise_only and args.context_expand_id is not None:
+        parser.error("--denoise-only expects source and target to use the same expansion grid.")
+    if args.denoise_only and args.selection_metric.startswith("expanded"):
+        args.selection_metric = "denoise-rmse"
+    if args.denoise_only:
+        args.eval_context_expand_id = None
     if args.cross_expansion and args.include_virtual_context:
         parser.error("--cross-expansion requires --no-include-virtual-context to prevent target leakage.")
     if args.use_gram_attention_bias and args.architecture != "encoder-decoder":
@@ -441,6 +460,7 @@ def main() -> None:
                 out,
                 batch,
                 target_is_noisy=args.target_is_noisy,
+                denoise_only=args.denoise_only,
                 **objective_kwargs,
             )
 
@@ -450,7 +470,7 @@ def main() -> None:
             optimizer.step()
 
             item = {key: float(value.cpu()) for key, value in loss_metrics.items()}
-            item.update(compute_metrics(batch, out.clean_mean.detach()))
+            item.update(compute_metrics(batch, out.clean_mean.detach(), denoise_only=args.denoise_only))
             train_items.append(item)
 
             if global_step % args.log_every == 0:
@@ -459,7 +479,7 @@ def main() -> None:
             global_step += 1
 
         train_metrics = average_metric_dict(train_items)
-        val_metrics = evaluate(model, val_loader, device, args.target_is_noisy, objective_kwargs)
+        val_metrics = evaluate(model, val_loader, device, args.target_is_noisy, args.denoise_only, objective_kwargs)
         log_tensorboard_scalars(writer, train_metrics, epoch, "train_epoch")
         log_tensorboard_scalars(writer, val_metrics, epoch, "val_epoch")
 
@@ -478,16 +498,21 @@ def main() -> None:
                 fig = make_uv_figure(sample, out.clean_mean)
                 writer.add_figure("val/uv_amplitude", fig, epoch)
 
-        best_metric_name = (
-            "expanded_only/corr" if args.selection_metric == "expanded-corr" else "expanded_only/rmse"
-        )
+        if args.selection_metric == "expanded-corr":
+            best_metric_name = "expanded_only/corr"
+        elif args.selection_metric == "expanded-rmse":
+            best_metric_name = "expanded_only/rmse"
+        elif args.selection_metric == "denoise-corr":
+            best_metric_name = "original/corr"
+        else:
+            best_metric_name = "original/rmse"
         best_metric = val_metrics.get(best_metric_name, math.nan)
         if math.isnan(best_metric):
             best_metric_name = "all/rmse"
             best_metric = val_metrics.get(best_metric_name, math.nan)
             metric_mode = "min"
         else:
-            metric_mode = "max" if args.selection_metric == "expanded-corr" else "min"
+            metric_mode = "max" if args.selection_metric in {"expanded-corr", "denoise-corr"} else "min"
         if math.isnan(best_metric):
             best_metric_name = "loss"
             best_metric = val_metrics[best_metric_name]
@@ -515,6 +540,7 @@ def main() -> None:
             f"train_loss={train_metrics.get('loss', math.nan):.6f} "
             f"val_loss={val_metrics.get('loss', math.nan):.6f} "
             f"val_all_rmse={val_metrics.get('all/rmse', math.nan):.6f} "
+            f"val_orig_rmse={val_metrics.get('original/rmse', math.nan):.6f} "
             f"val_exp_rmse={val_metrics.get('expanded_only/rmse', math.nan):.6f} "
             f"best_metric={best_metric_name}:{best_metric:.6f}"
         )

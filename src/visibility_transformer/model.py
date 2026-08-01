@@ -907,6 +907,7 @@ def visibility_physical_objective(
     output: BVTOutput,
     batch: VisibilityRegionInput,
     target_is_noisy: bool = False,
+    denoise_only: bool = False,
     beta_kl: float = 1e-3,
     beta_noise_prior: float = 1e-4,
     lambda_orig: float = 1.0,
@@ -968,10 +969,12 @@ def visibility_physical_objective(
     )
 
     kl = kl_normal(output.latent_mean, output.latent_logvar, output.prior_mean, output.prior_logvar)
-    mask = batch.target_mask.to(output.noise_logvar.dtype).unsqueeze(-1)
+    prior_mask = batch.original_mask if denoise_only else batch.target_mask
+    mask = prior_mask.to(output.noise_logvar.dtype).unsqueeze(-1)
     denom = (mask.sum() * output.noise_logvar.shape[-1]).clamp_min(1.0)
     noise_prior = (torch.exp(output.noise_logvar) * mask).sum() / denom
-    sym = hermitian_symmetry_loss(output.clean_mean, batch.coords, batch.token_mask, symmetry_tolerance)
+    symmetry_mask = batch.original_mask if denoise_only else batch.token_mask
+    sym = hermitian_symmetry_loss(output.clean_mean, batch.coords, symmetry_mask, symmetry_tolerance)
     energy_orig = complex_energy_loss(output.clean_mean, batch.target_values, batch.original_mask)
     energy_virtual = complex_energy_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
     amp_all = complex_amplitude_loss(output.clean_mean, batch.target_values, batch.target_mask)
@@ -992,22 +995,35 @@ def visibility_physical_objective(
     phase_virtual = complex_phase_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
     phase_expanded = complex_phase_loss(output.clean_mean, batch.target_values, expanded_mask)
 
-    region_nll = (
-        lambda_orig * nll_orig
-        + lambda_virtual * nll_virtual
-        + lambda_expanded * nll_expanded
-        + lambda_high_freq * nll_high_freq
-        + lambda_radial_bins * nll_radial_bins
-    )
-    energy = lambda_energy_orig * energy_orig + lambda_energy_virtual * energy_virtual
-    amplitude = lambda_amp_all * amp_all + lambda_amp_expanded * amp_expanded
-    sr_structure = lambda_expanded_nmse * expanded_radial_nmse + lambda_expanded_corr * expanded_corr
-    phase_loss = lambda_phase * phase + lambda_phase_expanded * phase_expanded
-    high_freq_structure = (
-        lambda_high_freq_charbonnier * high_freq_charbonnier
-        + lambda_high_freq_phase * high_freq_phase
-    )
-    calibration = lambda_uncertainty_calibration * uncertainty_cal
+    if denoise_only:
+        region_nll = lambda_orig * nll_orig
+        energy = lambda_energy_orig * energy_orig
+        amplitude = lambda_amp_all * amp_orig
+        sr_structure = output.clean_mean.new_zeros(())
+        phase_loss = lambda_phase * phase_orig
+        high_freq_structure = output.clean_mean.new_zeros(())
+        calibration = lambda_uncertainty_calibration * uncertainty_calibration_loss(
+            output,
+            batch.target_values,
+            batch.original_mask,
+        )
+    else:
+        region_nll = (
+            lambda_orig * nll_orig
+            + lambda_virtual * nll_virtual
+            + lambda_expanded * nll_expanded
+            + lambda_high_freq * nll_high_freq
+            + lambda_radial_bins * nll_radial_bins
+        )
+        energy = lambda_energy_orig * energy_orig + lambda_energy_virtual * energy_virtual
+        amplitude = lambda_amp_all * amp_all + lambda_amp_expanded * amp_expanded
+        sr_structure = lambda_expanded_nmse * expanded_radial_nmse + lambda_expanded_corr * expanded_corr
+        phase_loss = lambda_phase * phase + lambda_phase_expanded * phase_expanded
+        high_freq_structure = (
+            lambda_high_freq_charbonnier * high_freq_charbonnier
+            + lambda_high_freq_phase * high_freq_phase
+        )
+        calibration = lambda_uncertainty_calibration * uncertainty_cal
     loss = (
         region_nll
         + lambda_sym * sym

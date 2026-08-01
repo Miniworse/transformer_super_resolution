@@ -87,6 +87,7 @@ def main() -> None:
     parser.add_argument("--input-suffix", default=None)
     parser.add_argument("--target-suffix", default=None)
     parser.add_argument("--target-is-noisy", action="store_true")
+    parser.add_argument("--denoise-only", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--context-expand-id", type=int, default=None)
     parser.add_argument("--visibility-normalization", choices=["none", "original-rms"], default=None)
@@ -113,6 +114,7 @@ def main() -> None:
     )
     visibility_normalization = args.visibility_normalization or ckpt_args.get("visibility_normalization", "none")
     target_is_noisy = args.target_is_noisy or bool(ckpt_args.get("target_is_noisy", False))
+    denoise_only = bool(ckpt_args.get("denoise_only", False)) if args.denoise_only is None else args.denoise_only
     objective_kwargs = {
         "beta_kl": float(ckpt_args.get("beta_kl", 1e-3)),
         "beta_noise_prior": float(ckpt_args.get("beta_noise_prior", 1e-4)),
@@ -195,11 +197,12 @@ def main() -> None:
                 out,
                 batch,
                 target_is_noisy=target_is_noisy,
+                denoise_only=denoise_only,
                 **objective_kwargs,
             )
             item = {key: float(value.cpu()) for key, value in loss_metrics.items()}
             item["loss"] = float(loss.cpu())
-            item.update(compute_metrics(batch, out.clean_mean))
+            item.update(compute_metrics(batch, out.clean_mean, denoise_only=denoise_only))
             metric_items.append(item)
             if first_batch is None:
                 first_batch = batch

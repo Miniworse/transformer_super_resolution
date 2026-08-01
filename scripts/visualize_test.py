@@ -152,6 +152,7 @@ def plot_visualization(
     redundancy: Tensor,
     scene_id: int,
     expand_id: int,
+    denoise_only: bool,
     image_size: int,
     chunk_size: int,
 ) -> dict[str, float]:
@@ -206,7 +207,8 @@ def plot_visualization(
     img_err_vmax = np.percentile(image_error, 99.0)
 
     fig, axes = plt.subplots(2, 4, figsize=(16, 7.5), constrained_layout=True)
-    fig.suptitle(f"Scene {scene_id:04d}, expand_{expand_id}: matched uv visibility and image view", fontsize=13)
+    task_label = "denoising" if denoise_only else "matched uv visibility and image view"
+    fig.suptitle(f"Scene {scene_id:04d}, expand_{expand_id}: {task_label}", fontsize=13)
 
     scatter_panels = [
         ("original input |V|", original_np, np.abs(input_complex), "viridis", 0.0, vis_vmax),
@@ -224,8 +226,8 @@ def plot_visualization(
 
     image_panels = [
         ("image from original input", original_image, "coolwarm", img_vmin, img_vmax),
-        ("image from predicted expanded", pred_image, "coolwarm", img_vmin, img_vmax),
-        ("image from ideal expanded", target_image, "coolwarm", img_vmin, img_vmax),
+        ("image from predicted clean", pred_image, "coolwarm", img_vmin, img_vmax),
+        ("image from ideal clean", target_image, "coolwarm", img_vmin, img_vmax),
         ("image abs error", image_error, "magma", 0.0, img_err_vmax),
     ]
     extent = [xi[0], xi[-1], eta[0], eta[-1]]
@@ -258,6 +260,7 @@ def main() -> None:
     parser.add_argument("--expand-id", type=int, default=4)
     parser.add_argument("--input-suffix", default=None)
     parser.add_argument("--target-suffix", default=None)
+    parser.add_argument("--denoise-only", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--context-expand-id", type=int, default=None)
     parser.add_argument("--visibility-normalization", choices=["none", "original-rms"], default=None)
@@ -278,6 +281,7 @@ def main() -> None:
         else ckpt_args.get("eval_context_expand_id", ckpt_args.get("context_expand_id"))
     )
     visibility_normalization = args.visibility_normalization or ckpt_args.get("visibility_normalization", "none")
+    denoise_only = bool(ckpt_args.get("denoise_only", False)) if args.denoise_only is None else args.denoise_only
     include_virtual_context = (
         bool(ckpt_args.get("include_virtual_context", False))
         if args.include_virtual_context is None
@@ -324,7 +328,8 @@ def main() -> None:
     input_values = batch_cpu.values[0] * scale_cpu
     pred_values = pred_cpu * scale_cpu
     target_values = batch_cpu.target_values[0] * scale_cpu
-    image_mask = batch_cpu.virtual_mask[0] | batch_cpu.original_mask[0]
+    target_mask = batch_cpu.original_mask[0] if denoise_only else batch_cpu.target_mask[0]
+    image_mask = batch_cpu.original_mask[0] if denoise_only else batch_cpu.virtual_mask[0] | batch_cpu.original_mask[0]
     output_path = output_dir / f"scene_{args.scene_id:04d}_expand_{args.expand_id}_comparison.png"
 
     image_metrics = plot_visualization(
@@ -334,16 +339,17 @@ def main() -> None:
         pred_values,
         target_values,
         batch_cpu.original_mask[0],
-        batch_cpu.target_mask[0],
+        target_mask,
         image_mask,
         batch_cpu.redundancy[0],
         args.scene_id,
         args.expand_id,
+        denoise_only,
         args.image_size,
         args.chunk_size,
     )
 
-    metrics = compute_metrics(batch_cpu, pred_cpu.unsqueeze(0))
+    metrics = compute_metrics(batch_cpu, pred_cpu.unsqueeze(0), denoise_only=denoise_only)
     metrics.update({f"image/{key}": value for key, value in image_metrics.items()})
     metrics_path = output_path.with_suffix(".json")
     with metrics_path.open("w", encoding="utf-8") as handle:
