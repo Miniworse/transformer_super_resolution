@@ -84,6 +84,20 @@ def amplitude_weighted_mean_abs(values: np.ndarray, weights: np.ndarray) -> floa
     return float(np.sum(np.abs(values) * weights) / denom)
 
 
+def rolling_nanmedian(values: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1:
+        return values.copy()
+    radius = window // 2
+    result = np.full_like(values, np.nan, dtype=np.float64)
+    for idx in range(values.size):
+        start = max(0, idx - radius)
+        stop = min(values.size, idx + radius + 1)
+        chunk = values[start:stop]
+        if np.any(np.isfinite(chunk)):
+            result[idx] = float(np.nanmedian(chunk))
+    return result
+
+
 def plot_noise_lines(
     output_path: Path,
     coords: np.ndarray,
@@ -206,23 +220,20 @@ def plot_noise_phase_lines(
         alpha=0.35,
         label=f"low amp truth < p{amp_percentile:g}",
     )
-    axes[0].plot(
+    axes[0].scatter(
         stable_x,
         true_phase_sorted[stable_sorted],
         color="#1f77b4",
-        linewidth=1.0,
-        marker=".",
-        markersize=2.5,
+        s=9,
+        alpha=0.8,
         label="ground truth phase",
     )
-    axes[0].plot(
+    axes[0].scatter(
         stable_x,
         pred_phase_sorted[stable_sorted],
         color="#d62728",
-        linewidth=1.0,
-        marker=".",
-        markersize=2.5,
-        alpha=0.85,
+        s=9,
+        alpha=0.65,
         label="predicted phase",
     )
     axes[0].set_ylabel("wrapped phase")
@@ -239,15 +250,21 @@ def plot_noise_phase_lines(
         alpha=0.25,
         label="low amp tokens",
     )
-    axes[1].plot(
+    window = max(9, int(round(order.size * 0.035)))
+    if window % 2 == 0:
+        window += 1
+    phase_error_for_trend = np.where(stable_sorted, phase_error_sorted, np.nan)
+    phase_error_trend = rolling_nanmedian(phase_error_for_trend, window)
+
+    axes[1].scatter(
         stable_x,
         phase_error_sorted[stable_sorted],
         color="#2ca02c",
-        linewidth=1.0,
-        marker=".",
-        markersize=2.5,
+        s=9,
+        alpha=0.65,
         label="wrapped phase error",
     )
+    axes[1].plot(x, phase_error_trend, color="#0b6b23", linewidth=1.6, label=f"local median, window {window}")
     axes[1].set_ylabel("phase error")
     axes[1].set_ylim(-error_limit, error_limit)
     axes[1].grid(True, alpha=0.25)
