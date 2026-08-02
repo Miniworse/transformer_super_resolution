@@ -42,6 +42,10 @@ def unwrap_phase(values: np.ndarray) -> np.ndarray:
     return np.unwrap(np.angle(values))
 
 
+def wrapped_phase(values: np.ndarray) -> np.ndarray:
+    return np.angle(values)
+
+
 def symmetric_limit(*arrays: np.ndarray, percentile: float = 99.0) -> float:
     stacked = np.concatenate([np.ravel(array) for array in arrays])
     limit = float(np.nanpercentile(np.abs(stacked), percentile))
@@ -69,6 +73,15 @@ def component_corr(pred: np.ndarray, target: np.ndarray) -> float:
 
 def complex_phase_error(pred: np.ndarray, target: np.ndarray) -> np.ndarray:
     return np.angle(np.exp(1j * (np.angle(pred) - np.angle(target))))
+
+
+def amplitude_weighted_mean_abs(values: np.ndarray, weights: np.ndarray) -> float:
+    weights = np.asarray(weights, dtype=np.float64)
+    values = np.asarray(values, dtype=np.float64)
+    denom = float(np.sum(weights))
+    if denom <= 1e-12:
+        return math.nan
+    return float(np.sum(np.abs(values) * weights) / denom)
 
 
 def plot_noise_lines(
@@ -130,6 +143,141 @@ def plot_noise_lines(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
+
+
+def plot_noise_phase_lines(
+    output_path: Path,
+    coords: np.ndarray,
+    true_noise: np.ndarray,
+    pred_noise: np.ndarray,
+    scene_id: int,
+    expand_id: int,
+    amp_percentile: float = 20.0,
+    error_percentile: float = 95.0,
+) -> dict[str, float]:
+    import matplotlib.pyplot as plt
+
+    radius = np.linalg.norm(coords, axis=1)
+    order = np.argsort(radius)
+    x = np.arange(order.size)
+    radius_sorted = radius[order]
+
+    true_complex = as_complex(true_noise)
+    pred_complex = as_complex(pred_noise)
+    true_amp = np.abs(true_complex)
+    pred_amp = np.abs(pred_complex)
+    amp_threshold = float(np.nanpercentile(true_amp, amp_percentile))
+    if not np.isfinite(amp_threshold) or amp_threshold <= 0.0:
+        amp_threshold = 1e-8
+
+    stable = true_amp >= amp_threshold
+    if not np.any(stable):
+        stable = np.ones_like(true_amp, dtype=bool)
+
+    true_phase = wrapped_phase(true_complex)
+    pred_phase = wrapped_phase(pred_complex)
+    phase_error = complex_phase_error(pred_complex, true_complex)
+
+    true_amp_sorted = true_amp[order]
+    pred_amp_sorted = pred_amp[order]
+    stable_sorted = stable[order]
+    stable_x = x[stable_sorted]
+
+    true_phase_sorted = true_phase[order]
+    pred_phase_sorted = pred_phase[order]
+    phase_error_sorted = phase_error[order]
+
+    stable_error = phase_error[stable]
+    error_limit = symmetric_limit(stable_error, percentile=error_percentile)
+    error_limit = min(math.pi, max(0.15, error_limit * 1.15))
+    amp_limit = positive_limit(true_amp, pred_amp, percentile=99.0)
+
+    fig, axes = plt.subplots(4, 1, figsize=(14, 11), sharex=True, constrained_layout=True)
+    fig.suptitle(
+        f"Scene {scene_id:04d}, expand_{expand_id}: noise phase details, sorted by uv radius",
+        fontsize=13,
+    )
+
+    axes[0].scatter(
+        x[~stable_sorted],
+        true_phase_sorted[~stable_sorted],
+        s=5,
+        color="#bbbbbb",
+        alpha=0.35,
+        label=f"low amp truth < p{amp_percentile:g}",
+    )
+    axes[0].plot(
+        stable_x,
+        true_phase_sorted[stable_sorted],
+        color="#1f77b4",
+        linewidth=1.0,
+        marker=".",
+        markersize=2.5,
+        label="ground truth phase",
+    )
+    axes[0].plot(
+        stable_x,
+        pred_phase_sorted[stable_sorted],
+        color="#d62728",
+        linewidth=1.0,
+        marker=".",
+        markersize=2.5,
+        alpha=0.85,
+        label="predicted phase",
+    )
+    axes[0].set_ylabel("wrapped phase")
+    axes[0].set_ylim(-math.pi, math.pi)
+    axes[0].grid(True, alpha=0.25)
+    axes[0].legend(loc="upper right", ncol=3, fontsize=8)
+
+    axes[1].axhline(0.0, color="#444444", linewidth=0.8)
+    axes[1].scatter(
+        x[~stable_sorted],
+        phase_error_sorted[~stable_sorted],
+        s=5,
+        color="#bbbbbb",
+        alpha=0.25,
+        label="low amp tokens",
+    )
+    axes[1].plot(
+        stable_x,
+        phase_error_sorted[stable_sorted],
+        color="#2ca02c",
+        linewidth=1.0,
+        marker=".",
+        markersize=2.5,
+        label="wrapped phase error",
+    )
+    axes[1].set_ylabel("phase error")
+    axes[1].set_ylim(-error_limit, error_limit)
+    axes[1].grid(True, alpha=0.25)
+    axes[1].legend(loc="upper right", ncol=2, fontsize=8)
+
+    axes[2].plot(x, true_amp_sorted, color="#1f77b4", linewidth=1.0, label="ground truth |delta V|")
+    axes[2].plot(x, pred_amp_sorted, color="#d62728", linewidth=1.0, alpha=0.85, label="predicted |delta V|")
+    axes[2].axhline(amp_threshold, color="#444444", linewidth=0.9, linestyle="--", label="stable phase threshold")
+    axes[2].set_ylabel("|delta V|")
+    axes[2].set_ylim(0.0, amp_limit)
+    axes[2].grid(True, alpha=0.25)
+    axes[2].legend(loc="upper right", ncol=3, fontsize=8)
+
+    axes[3].plot(x, radius_sorted, color="#444444", linewidth=1.0)
+    axes[3].fill_between(x, 0.0, radius_sorted, where=stable_sorted, color="#1f77b4", alpha=0.12, label="stable phase tokens")
+    axes[3].set_ylabel("uv radius")
+    axes[3].set_xlabel("token index sorted by uv radius")
+    axes[3].grid(True, alpha=0.25)
+    axes[3].legend(loc="upper left", fontsize=8)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+    return {
+        "noise/phase_stable_amp_threshold": amp_threshold,
+        "noise/phase_stable_fraction": float(np.mean(stable)),
+        "noise/phase_mae_rad_stable": float(np.mean(np.abs(phase_error[stable]))),
+        "noise/phase_mae_rad_amp_weighted": amplitude_weighted_mean_abs(phase_error, true_amp),
+    }
 
 
 def plot_delta_v_uv_image(
@@ -209,6 +357,8 @@ def main() -> None:
     parser.add_argument("--include-virtual-context", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--context-expand-id", type=int, default=None)
     parser.add_argument("--visibility-normalization", choices=["none", "original-rms"], default=None)
+    parser.add_argument("--phase-amp-percentile", type=float, default=20.0)
+    parser.add_argument("--phase-error-percentile", type=float, default=95.0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
@@ -281,17 +431,30 @@ def main() -> None:
 
     stem = f"scene_{args.scene_id:04d}_expand_{args.expand_id}_noise"
     line_path = output_dir / f"{stem}_lines.png"
+    phase_path = output_dir / f"{stem}_phase_lines.png"
     uv_path = output_dir / f"{stem}_uv_delta_v.png"
     metrics_path = output_dir / f"{stem}.json"
 
     plot_noise_lines(line_path, coords, true_noise, pred_noise, args.scene_id, args.expand_id)
+    phase_metrics = plot_noise_phase_lines(
+        phase_path,
+        coords,
+        true_noise,
+        pred_noise,
+        args.scene_id,
+        args.expand_id,
+        amp_percentile=args.phase_amp_percentile,
+        error_percentile=args.phase_error_percentile,
+    )
     plot_delta_v_uv_image(uv_path, coords, true_noise, pred_noise, args.scene_id, args.expand_id)
     metrics = noise_metrics(true_noise, pred_noise)
+    metrics.update(phase_metrics)
     metrics.update({
         "scene_id": args.scene_id,
         "expand_id": args.expand_id,
         "num_tokens": int(mask.sum()),
         "line_figure": str(line_path),
+        "phase_figure": str(phase_path),
         "uv_delta_v_figure": str(uv_path),
     })
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
