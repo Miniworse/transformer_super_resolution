@@ -26,6 +26,7 @@ class NoiseSummary:
     path: str
     scene: int
     expand: int
+    target_rms: float
     sigma_real: float
     sigma_imag: float
     mean_real: float
@@ -95,12 +96,17 @@ def noise_summary(path: str, scene: int, expand: int, clean: np.ndarray, noisy: 
         path=path,
         scene=scene,
         expand=expand,
+        target_rms=float(np.sqrt(np.mean(clean_ri * clean_ri))),
         sigma_real=float(delta_ri[:, 0].std()),
         sigma_imag=float(delta_ri[:, 1].std()),
         mean_real=float(delta_ri[:, 0].mean()),
         mean_imag=float(delta_ri[:, 1].mean()),
         clean_abs_delta_abs_corr=corr,
     )
+
+
+def scaled_clean(clean: np.ndarray, clean_scale: float) -> np.ndarray:
+    return (clean.astype(np.float64) * clean_scale).astype(clean.dtype, copy=False)
 
 
 def make_noisy(clean: np.ndarray, sigma: float, seed: int) -> np.ndarray:
@@ -115,6 +121,7 @@ def aggregate_summaries(summaries: Iterable[NoiseSummary]) -> dict[str, float | 
         return {"num_regenerated": 0}
     return {
         "num_regenerated": len(items),
+        "target_rms_mean": float(np.mean([item.target_rms for item in items])),
         "sigma_real_mean": float(np.mean([item.sigma_real for item in items])),
         "sigma_imag_mean": float(np.mean([item.sigma_imag for item in items])),
         "mean_real_mean": float(np.mean([item.mean_real for item in items])),
@@ -133,6 +140,11 @@ def regenerate_zip(args: argparse.Namespace, expand_ids: set[int] | None) -> lis
         with ZipFile(args.output, "w", compression=compression, compresslevel=args.compresslevel) as dst:
             for name in names:
                 parsed = should_regenerate(name, args.noise_suffix, expand_ids)
+                clean_parsed = should_regenerate(name, args.clean_suffix, expand_ids)
+                if clean_parsed is not None:
+                    clean = load_npy_from_zip(src, name)
+                    dst.writestr(name, write_npy_bytes(scaled_clean(clean, args.clean_scale)))
+                    continue
                 if parsed is None:
                     dst.writestr(name, src.read(name))
                     continue
@@ -140,7 +152,7 @@ def regenerate_zip(args: argparse.Namespace, expand_ids: set[int] | None) -> lis
                 if clean_name not in name_set:
                     raise FileNotFoundError(f"Missing clean pair for {name}: {clean_name}")
                 scene, expand = parsed
-                clean = load_npy_from_zip(src, clean_name)
+                clean = scaled_clean(load_npy_from_zip(src, clean_name), args.clean_scale)
                 noisy = make_noisy(clean, args.sigma, stable_seed(args.seed, name))
                 dst.writestr(name, write_npy_bytes(noisy))
                 summaries.append(noise_summary(name, scene, expand, clean, noisy))
@@ -162,6 +174,11 @@ def regenerate_directory(args: argparse.Namespace, expand_ids: set[int] | None) 
             continue
         parsed = should_regenerate(rel.as_posix(), args.noise_suffix, expand_ids)
         dst_path.parent.mkdir(parents=True, exist_ok=True)
+        clean_parsed = should_regenerate(rel.as_posix(), args.clean_suffix, expand_ids)
+        if clean_parsed is not None:
+            clean = np.load(src_path)
+            np.save(dst_path, scaled_clean(clean, args.clean_scale))
+            continue
         if parsed is None:
             if not dst_path.exists() or args.overwrite:
                 shutil.copy2(src_path, dst_path)
@@ -170,7 +187,7 @@ def regenerate_directory(args: argparse.Namespace, expand_ids: set[int] | None) 
         if not clean_path.exists():
             raise FileNotFoundError(f"Missing clean pair for {src_path}: {clean_path}")
         scene, expand = parsed
-        clean = np.load(clean_path)
+        clean = scaled_clean(np.load(clean_path), args.clean_scale)
         noisy = make_noisy(clean, args.sigma, stable_seed(args.seed, rel.as_posix()))
         np.save(dst_path, noisy)
         summaries.append(noise_summary(rel.as_posix(), scene, expand, clean, noisy))
@@ -182,6 +199,7 @@ def main() -> None:
     parser.add_argument("--input", type=Path, required=True, help="Input srdata directory or zip.")
     parser.add_argument("--output", type=Path, required=True, help="Output srdata directory or zip.")
     parser.add_argument("--sigma", type=float, default=0.05, help="Gaussian std per real/imag component.")
+    parser.add_argument("--clean-scale", type=float, default=1.0, help="Scale applied to clean target files before adding noise.")
     parser.add_argument("--seed", type=int, default=20260802)
     parser.add_argument("--clean-suffix", default="noised_0")
     parser.add_argument("--noise-suffix", default="noised_1")
@@ -206,6 +224,7 @@ def main() -> None:
         "input": str(args.input),
         "output": str(args.output),
         "sigma": args.sigma,
+        "clean_scale": args.clean_scale,
         "seed": args.seed,
         "clean_suffix": args.clean_suffix,
         "noise_suffix": args.noise_suffix,
