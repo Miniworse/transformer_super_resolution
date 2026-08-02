@@ -430,6 +430,7 @@ python scripts/train.py `
   --visibility-normalization original-rms `
   --use-complex-features `
   --separate-denoising-head `
+  --noise-residual-denoising `
   --selection-metric denoise-rmse `
   --lambda-orig 1.0 `
   --lambda-virtual 0.0 `
@@ -440,6 +441,8 @@ python scripts/train.py `
   --lambda-amp-expanded 0.0 `
   --lambda-expanded-nmse 0.0 `
   --lambda-expanded-corr 0.0 `
+  --lambda-noise-zero-mean 0.01 `
+  --lambda-denoise-clean-charbonnier 0.2 `
   --epochs 60 `
   --run-dir runs/bvt_denoise_expand0
 ```
@@ -447,3 +450,9 @@ python scripts/train.py `
 With `--denoise-only`, the objective, checkpoint selection, evaluation, and
 visualization use the original observed uv mask. `expanded_only` losses and
 metrics are not used for training or model selection.
+
+Adding `--noise-residual-denoising` changes the observed head into a physical
+complex-noise predictor. It predicts `noise = noisy_input - clean_visibility`,
+computes `clean = noisy_input - noise`, and trains the observed likelihood on
+the complex Gaussian noise residual. The amplitude, phase, and optional
+Charbonnier terms still constrain the resulting clean visibility.

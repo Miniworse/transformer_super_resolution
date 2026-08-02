@@ -79,6 +79,7 @@ class BVTOutput:
     prior_mean: Tensor
     prior_logvar: Tensor
     expanded_residual: Optional[Tensor] = None
+    noise_mean: Optional[Tensor] = None
 
     @property
     def total_logvar(self) -> Tensor:
@@ -472,6 +473,7 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         gram_prior_mode: str = "feature",
         use_complex_features: bool = False,
         separate_denoising_head: bool = False,
+        noise_residual_denoising: bool = False,
         use_expanded_residual_head: bool = False,
         expanded_residual_start_radius: float = 0.55,
         expanded_residual_radius_power: float = 1.0,
@@ -490,6 +492,7 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         self.use_gram_prior = use_gram_prior
         self.gram_prior_mode = gram_prior_mode
         self.separate_denoising_head = separate_denoising_head
+        self.noise_residual_denoising = noise_residual_denoising
         self.use_expanded_residual_head = use_expanded_residual_head
         self.expanded_residual_start_radius = expanded_residual_start_radius
         self.expanded_residual_radius_power = expanded_residual_radius_power
@@ -641,13 +644,17 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             if self.use_gram_prior and self.gram_prior_mode == "residual"
             else torch.zeros_like(delta_or_value)
         )
-        observed_mean = values + denoising_pred[..., :2]
+        if self.noise_residual_denoising:
+            observed_mean = values - denoising_pred[..., :2]
+        else:
+            observed_mean = values + denoising_pred[..., :2]
         clean_mean = torch.where(
             known_mask.bool().unsqueeze(-1),
             observed_mean,
             query_baseline + delta_or_value + expanded_residual,
         )
         clean_mean = hermitian_symmetrize_complex_values(clean_mean, coords, token_mask)
+        effective_noise_mean = (values - clean_mean).masked_fill(~known_mask.bool().unsqueeze(-1), 0.0)
         clean_logvar = torch.where(
             known_mask.bool().unsqueeze(-1),
             denoising_pred[..., 2:3],
@@ -668,6 +675,7 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             prior_mean=prior_mean,
             prior_logvar=prior_logvar,
             expanded_residual=expanded_residual,
+            noise_mean=effective_noise_mean,
         )
 
 
@@ -903,11 +911,36 @@ def uncertainty_calibration_loss(output: BVTOutput, target_values: Tensor, mask:
     return ((log_var - log_error).pow(2) * weights).sum() / weights.sum().clamp_min(1.0)
 
 
+def noise_uncertainty_calibration_loss(
+    predicted_noise: Tensor,
+    target_noise: Tensor,
+    noise_logvar: Tensor,
+    mask: Tensor,
+) -> Tensor:
+    """Match predicted noise variance to realized complex noise-residual error."""
+    if mask.sum() == 0:
+        return predicted_noise.new_zeros(())
+    error_power = (predicted_noise.detach() - target_noise).pow(2).sum(dim=-1).clamp_min(1e-10)
+    predicted_var = torch.exp(noise_logvar).squeeze(-1).clamp_min(1e-10)
+    weights = mask.to(predicted_noise.dtype)
+    return ((torch.log(predicted_var) - torch.log(error_power)).pow(2) * weights).sum() / weights.sum().clamp_min(1.0)
+
+
+def complex_zero_mean_loss(values: Tensor, mask: Tensor) -> Tensor:
+    """Weakly encourage unbiased complex Gaussian noise over a masked region."""
+    if mask.sum() == 0:
+        return values.new_zeros(())
+    weights = mask.to(values.dtype).unsqueeze(-1)
+    mean = (values * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+    return mean.pow(2).sum(dim=-1).mean()
+
+
 def visibility_physical_objective(
     output: BVTOutput,
     batch: VisibilityRegionInput,
     target_is_noisy: bool = False,
     denoise_only: bool = False,
+    denoise_noise_residual: bool = False,
     beta_kl: float = 1e-3,
     beta_noise_prior: float = 1e-4,
     lambda_orig: float = 1.0,
@@ -927,6 +960,8 @@ def visibility_physical_objective(
     lambda_expanded_nmse: float = 0.5,
     lambda_expanded_corr: float = 0.3,
     lambda_uncertainty_calibration: float = 0.02,
+    lambda_noise_zero_mean: float = 0.0,
+    lambda_denoise_clean_charbonnier: float = 0.0,
     freq_alpha: float = 2.0,
     freq_gamma: float = 1.0,
     num_radial_bins: int = 8,
@@ -939,6 +974,17 @@ def visibility_physical_objective(
     radial_bin_weights = radial_bin_balanced_weights(batch.coords, expanded_mask, num_radial_bins)
 
     nll_orig = complex_gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, batch.original_mask)
+    target_noise = batch.values - batch.target_values
+    if output.noise_mean is None:
+        predicted_noise = batch.values - output.clean_mean
+    else:
+        predicted_noise = output.noise_mean
+    noise_nll_orig = complex_gaussian_nll(
+        target_noise,
+        predicted_noise,
+        output.noise_logvar,
+        batch.original_mask,
+    )
     nll_virtual = complex_gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, batch.virtual_mask)
     nll_expanded = complex_gaussian_nll(batch.target_values, output.clean_mean, likelihood_logvar, expanded_mask)
     nll_high_freq = complex_gaussian_nll(
@@ -994,19 +1040,33 @@ def visibility_physical_objective(
     phase_orig = complex_phase_loss(output.clean_mean, batch.target_values, batch.original_mask)
     phase_virtual = complex_phase_loss(output.clean_mean, batch.target_values, batch.virtual_mask)
     phase_expanded = complex_phase_loss(output.clean_mean, batch.target_values, expanded_mask)
+    noise_rmse = torch.sqrt(complex_normalized_mse(predicted_noise, target_noise, batch.original_mask).clamp_min(0.0))
+    noise_zero_mean = complex_zero_mean_loss(predicted_noise, batch.original_mask)
+    denoise_clean_charbonnier = complex_charbonnier_loss(
+        output.clean_mean,
+        batch.target_values,
+        batch.original_mask,
+    )
 
     if denoise_only:
-        region_nll = lambda_orig * nll_orig
+        observed_nll = noise_nll_orig if denoise_noise_residual else nll_orig
+        region_nll = lambda_orig * observed_nll
         energy = lambda_energy_orig * energy_orig
-        amplitude = lambda_amp_all * amp_orig
+        amplitude = lambda_amp_all * amp_orig + lambda_denoise_clean_charbonnier * denoise_clean_charbonnier
         sr_structure = output.clean_mean.new_zeros(())
         phase_loss = lambda_phase * phase_orig
         high_freq_structure = output.clean_mean.new_zeros(())
-        calibration = lambda_uncertainty_calibration * uncertainty_calibration_loss(
-            output,
-            batch.target_values,
-            batch.original_mask,
-        )
+        if denoise_noise_residual:
+            active_uncertainty_cal = noise_uncertainty_calibration_loss(
+                predicted_noise,
+                target_noise,
+                output.noise_logvar,
+                batch.original_mask,
+            )
+        else:
+            active_uncertainty_cal = uncertainty_calibration_loss(output, batch.target_values, batch.original_mask)
+        calibration = lambda_uncertainty_calibration * active_uncertainty_cal
+        noise_bias = lambda_noise_zero_mean * noise_zero_mean
     else:
         region_nll = (
             lambda_orig * nll_orig
@@ -1024,6 +1084,8 @@ def visibility_physical_objective(
             + lambda_high_freq_phase * high_freq_phase
         )
         calibration = lambda_uncertainty_calibration * uncertainty_cal
+        active_uncertainty_cal = uncertainty_cal
+        noise_bias = output.clean_mean.new_zeros(())
     loss = (
         region_nll
         + lambda_sym * sym
@@ -1033,6 +1095,7 @@ def visibility_physical_objective(
         + phase_loss
         + high_freq_structure
         + calibration
+        + noise_bias
         + beta_kl * kl
         + beta_noise_prior * noise_prior
     )
@@ -1040,6 +1103,7 @@ def visibility_physical_objective(
         "loss": loss.detach(),
         "region_nll": region_nll.detach(),
         "nll_original": nll_orig.detach(),
+        "noise_nll_original": noise_nll_orig.detach(),
         "nll_virtual": nll_virtual.detach(),
         "nll_expanded_only": nll_expanded.detach(),
         "nll_high_freq": nll_high_freq.detach(),
@@ -1056,6 +1120,7 @@ def visibility_physical_objective(
         "amplitude_original": amp_orig.detach(),
         "amplitude_virtual": amp_virtual.detach(),
         "amplitude_expanded_only": amp_expanded.detach(),
+        "denoise_clean_charbonnier": denoise_clean_charbonnier.detach(),
         "expanded_nmse_loss": expanded_nmse.detach(),
         "expanded_radial_nmse_loss": expanded_radial_nmse.detach(),
         "expanded_corr_loss": expanded_corr.detach(),
@@ -1065,7 +1130,10 @@ def visibility_physical_objective(
         "phase_virtual": phase_virtual.detach(),
         "phase_expanded_only": phase_expanded.detach(),
         "phase_loss": phase_loss.detach(),
-        "uncertainty_calibration": uncertainty_cal.detach(),
+        "noise_rmse_normalized": noise_rmse.detach(),
+        "noise_zero_mean": noise_zero_mean.detach(),
+        "noise_bias": noise_bias.detach(),
+        "uncertainty_calibration": active_uncertainty_cal.detach(),
         "calibration": calibration.detach(),
         "kl": kl.detach(),
         "noise_prior": noise_prior.detach(),

@@ -189,6 +189,58 @@ def test_denoise_only_objective_ignores_expanded_tokens():
     assert torch.count_nonzero(clean_mean.grad[0, 1]) == 0
 
 
+def test_noise_residual_denoising_trains_noise_on_original_tokens():
+    predicted_noise = torch.tensor([[[0.0, 0.0], [5.0, -5.0]]], requires_grad=True)
+    noisy_values = torch.tensor([[[1.2, 0.1], [0.0, 0.0]]])
+    clean_target = torch.tensor([[[1.0, 0.0], [0.0, 0.0]]])
+    zeros = torch.zeros(1, 2, 1)
+    latent = torch.zeros(1, 2)
+    batch = VisibilityRegionInput(
+        values=noisy_values,
+        coords=torch.tensor([[[0.0, 0.0], [2.0, 0.0]]]),
+        known_mask=torch.tensor([[True, False]]),
+        redundancy=torch.ones(1, 2, 2),
+        token_mask=torch.tensor([[True, True]]),
+        target_values=clean_target,
+        target_mask=torch.tensor([[True, True]]),
+        original_mask=torch.tensor([[True, False]]),
+        virtual_mask=torch.tensor([[True, True]]),
+        visibility_scale=torch.ones(1, 1, 1),
+        gram_context_values=torch.zeros(1, 2, 2),
+    )
+    output = BVTOutput(
+        clean_mean=noisy_values - predicted_noise,
+        clean_logvar=zeros,
+        noise_logvar=zeros,
+        latent_mean=latent,
+        latent_logvar=latent,
+        prior_mean=latent,
+        prior_logvar=latent,
+        noise_mean=predicted_noise,
+    )
+
+    loss, metrics = visibility_physical_objective(
+        output,
+        batch,
+        denoise_only=True,
+        denoise_noise_residual=True,
+        beta_kl=0.0,
+        beta_noise_prior=0.0,
+        lambda_orig=1.0,
+        lambda_sym=0.0,
+        lambda_energy_orig=0.0,
+        lambda_phase=0.0,
+        lambda_amp_all=0.0,
+        lambda_uncertainty_calibration=0.0,
+        lambda_noise_zero_mean=0.0,
+    )
+    loss.backward()
+
+    assert metrics["noise_nll_original"].item() == metrics["region_nll"].item()
+    assert torch.count_nonzero(predicted_noise.grad[0, 0]) > 0
+    assert torch.count_nonzero(predicted_noise.grad[0, 1]) == 0
+
+
 if __name__ == "__main__":
     test_complex_features_are_compressed_and_masked()
     test_source_uv_alignment_builds_observed_mask()
@@ -196,4 +248,5 @@ if __name__ == "__main__":
     test_cross_expansion_curriculum_uses_lower_source_support()
     test_cross_expansion_falls_back_to_union_for_offset_grids()
     test_denoise_only_objective_ignores_expanded_tokens()
+    test_noise_residual_denoising_trains_noise_on_original_tokens()
     print("cross-expansion training assertions passed")

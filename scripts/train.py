@@ -152,6 +152,7 @@ def create_model(args: argparse.Namespace):
             num_encoder_layers=args.num_encoder_layers,
             num_decoder_layers=args.num_decoder_layers,
             separate_denoising_head=args.separate_denoising_head,
+            noise_residual_denoising=args.noise_residual_denoising,
             use_expanded_residual_head=args.use_expanded_residual_head,
             expanded_residual_start_radius=args.expanded_residual_start_radius,
             expanded_residual_radius_power=args.expanded_residual_radius_power,
@@ -283,6 +284,8 @@ def main() -> None:
     parser.add_argument("--lambda-expanded-nmse", type=float, default=0.5)
     parser.add_argument("--lambda-expanded-corr", type=float, default=0.3)
     parser.add_argument("--lambda-uncertainty-calibration", type=float, default=0.02)
+    parser.add_argument("--lambda-noise-zero-mean", type=float, default=0.0)
+    parser.add_argument("--lambda-denoise-clean-charbonnier", type=float, default=0.0)
     parser.add_argument("--freq-alpha", type=float, default=2.0)
     parser.add_argument("--freq-gamma", type=float, default=1.0)
     parser.add_argument("--num-radial-bins", type=int, default=8)
@@ -297,6 +300,7 @@ def main() -> None:
     parser.add_argument("--num-frequencies", type=int, default=16)
     parser.add_argument("--use-complex-features", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--separate-denoising-head", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--noise-residual-denoising", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--use-expanded-residual-head", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--expanded-residual-start-radius", type=float, default=0.55)
     parser.add_argument("--expanded-residual-radius-power", type=float, default=1.0)
@@ -314,6 +318,8 @@ def main() -> None:
         default="expanded-corr",
     )
     args = parser.parse_args()
+    if args.noise_residual_denoising and not args.separate_denoising_head:
+        parser.error("--noise-residual-denoising requires --separate-denoising-head.")
     if args.denoise_only and args.cross_expansion:
         parser.error("--denoise-only cannot be combined with --cross-expansion.")
     if args.denoise_only and args.context_expand_id is not None:
@@ -431,6 +437,9 @@ def main() -> None:
         "lambda_expanded_nmse": args.lambda_expanded_nmse,
         "lambda_expanded_corr": args.lambda_expanded_corr,
         "lambda_uncertainty_calibration": args.lambda_uncertainty_calibration,
+        "denoise_noise_residual": args.noise_residual_denoising,
+        "lambda_noise_zero_mean": args.lambda_noise_zero_mean,
+        "lambda_denoise_clean_charbonnier": args.lambda_denoise_clean_charbonnier,
         "freq_alpha": args.freq_alpha,
         "freq_gamma": args.freq_gamma,
         "num_radial_bins": args.num_radial_bins,

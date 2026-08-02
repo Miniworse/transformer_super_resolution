@@ -58,6 +58,7 @@ def create_model_from_args(ckpt_args: dict):
             num_encoder_layers=int(ckpt_args.get("num_encoder_layers", 6)),
             num_decoder_layers=int(ckpt_args.get("num_decoder_layers", 4)),
             separate_denoising_head=bool(ckpt_args.get("separate_denoising_head", False)),
+            noise_residual_denoising=bool(ckpt_args.get("noise_residual_denoising", False)),
             use_expanded_residual_head=bool(ckpt_args.get("use_expanded_residual_head", False)),
             expanded_residual_start_radius=float(ckpt_args.get("expanded_residual_start_radius", 0.55)),
             expanded_residual_radius_power=float(ckpt_args.get("expanded_residual_radius_power", 1.0)),
