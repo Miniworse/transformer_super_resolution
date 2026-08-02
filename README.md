@@ -452,11 +452,59 @@ With `--denoise-only`, the objective, checkpoint selection, evaluation, and
 visualization use the original observed uv mask. `expanded_only` losses and
 metrics are not used for training or model selection.
 
+For denoise-only checkpoints, `visualize_test.py` also writes a component
+diagnostic figure next to the normal comparison image:
+
+```powershell
+python scripts/visualize_test.py `
+  --checkpoint runs/bvt_denoise_expand0/checkpoints/best.pt `
+  --data-root srdata/srdata25Juin `
+  --scene-id 1001 `
+  --expand-id 0 `
+  --denoise-only
+```
+
+The extra `*_denoise_components.png` figure shows raw, clean target, predicted
+clean, and remaining error separately for real, imaginary, phase, and noise
+amplitude. This avoids hiding Gaussian noise inside an amplitude-only `|V|`
+scatter plot.
+
+For line charts of the learned noise itself, run:
+
+```powershell
+python scripts/visualize_noise.py `
+  --checkpoint runs/bvt_denoise_expand0/checkpoints/best.pt `
+  --data-root srdata/srdata25Juin `
+  --scene-id 1001 `
+  --expand-id 0 `
+  --denoise-only
+```
+
+This writes `*_noise_lines.png`, `*_noise_uv_delta_v.png`, and a matching JSON
+with true-noise, predicted-noise, and remaining-error metrics.
+
 Adding `--noise-residual-denoising` changes the observed head into a physical
 complex-noise predictor. It predicts `noise = noisy_input - clean_visibility`,
 computes `clean = noisy_input - noise`, and trains the observed likelihood on
 the complex Gaussian noise residual. The amplitude, phase, and optional
 Charbonnier terms still constrain the resulting clean visibility.
+
+To compare a dual clean/noise decoder setup, add:
+
+```powershell
+  --dual-clean-noise-head `
+  --lambda-clean-noise-consistency 1.0
+```
+
+This makes the decoder branch predict clean visibility directly, while the
+denoising branch predicts the complex noise residual. The consistency term
+penalizes:
+
+```text
+predicted_clean + predicted_noise - noisy_input
+```
+
+so the two branches remain physically tied to the observed visibility.
 
 To fine-tune from a direct-clean denoise checkpoint, add:
 

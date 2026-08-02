@@ -96,6 +96,36 @@ def test_shared_denoising_noise_logvar_uses_one_observed_variance():
     assert torch.allclose(output.noise_logvar[0, 0], output.noise_logvar[0, 1])
 
 
+def test_dual_clean_noise_head_uses_decoder_clean_and_noise_residual():
+    model = BayesianVisibilityEncoderDecoder(
+        model_dim=32,
+        latent_dim=8,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        num_heads=4,
+        num_frequencies=2,
+        separate_denoising_head=True,
+        noise_residual_denoising=True,
+        dual_clean_noise_head=True,
+        dropout=0.0,
+    )
+    coords = torch.tensor([[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]])
+    values = torch.tensor([[[1.0, 0.2], [0.8, -0.1], [0.0, 0.0]]])
+    known = torch.tensor([[True, True, False]])
+    token_mask = torch.ones_like(known)
+    redundancy = torch.ones(1, 3, 2)
+
+    output = model(values, coords, known, redundancy, token_mask)
+    loss = output.clean_mean[known].sum() + output.noise_mean[known].sum()
+    loss.backward()
+
+    assert torch.isfinite(output.clean_mean).all()
+    assert torch.isfinite(output.noise_mean).all()
+    assert model.head[-1].weight.grad is not None
+    assert model.denoising_head[-1].weight.grad is not None
+    assert torch.count_nonzero(output.noise_mean[~known]) == 0
+
+
 def _write_sample(root: Path, expand_id: int, uv: np.ndarray) -> None:
     scene = 1
     noisy = np.stack([uv[:, 0] + 1.0, uv[:, 1] - 0.5], axis=-1).astype(np.float32)
@@ -267,13 +297,70 @@ def test_noise_residual_denoising_trains_noise_on_original_tokens():
     assert torch.count_nonzero(predicted_noise.grad[0, 1]) == 0
 
 
+def test_clean_noise_consistency_trains_clean_and_noise_predictions():
+    clean_mean = torch.tensor([[[1.0, 0.0], [0.0, 0.0]]], requires_grad=True)
+    predicted_noise = torch.tensor([[[0.1, 0.0], [5.0, -5.0]]], requires_grad=True)
+    noisy_values = torch.tensor([[[1.4, 0.2], [0.0, 0.0]]])
+    clean_target = torch.tensor([[[1.0, 0.0], [0.0, 0.0]]])
+    zeros = torch.zeros(1, 2, 1)
+    latent = torch.zeros(1, 2)
+    batch = VisibilityRegionInput(
+        values=noisy_values,
+        coords=torch.tensor([[[0.0, 0.0], [2.0, 0.0]]]),
+        known_mask=torch.tensor([[True, False]]),
+        redundancy=torch.ones(1, 2, 2),
+        token_mask=torch.tensor([[True, True]]),
+        target_values=clean_target,
+        target_mask=torch.tensor([[True, True]]),
+        original_mask=torch.tensor([[True, False]]),
+        virtual_mask=torch.tensor([[True, True]]),
+        visibility_scale=torch.ones(1, 1, 1),
+        gram_context_values=torch.zeros(1, 2, 2),
+    )
+    output = BVTOutput(
+        clean_mean=clean_mean,
+        clean_logvar=zeros,
+        noise_logvar=zeros,
+        latent_mean=latent,
+        latent_logvar=latent,
+        prior_mean=latent,
+        prior_logvar=latent,
+        noise_mean=predicted_noise,
+    )
+
+    loss, metrics = visibility_physical_objective(
+        output,
+        batch,
+        denoise_only=True,
+        denoise_noise_residual=True,
+        beta_kl=0.0,
+        beta_noise_prior=0.0,
+        lambda_orig=0.0,
+        lambda_sym=0.0,
+        lambda_energy_orig=0.0,
+        lambda_phase=0.0,
+        lambda_amp_all=0.0,
+        lambda_uncertainty_calibration=0.0,
+        lambda_noise_zero_mean=0.0,
+        lambda_clean_noise_consistency=1.0,
+    )
+    loss.backward()
+
+    assert metrics["consistency"].item() > 0.0
+    assert torch.count_nonzero(clean_mean.grad[0, 0]) > 0
+    assert torch.count_nonzero(predicted_noise.grad[0, 0]) > 0
+    assert torch.count_nonzero(predicted_noise.grad[0, 1]) == 0
+
+
 if __name__ == "__main__":
     test_complex_features_are_compressed_and_masked()
     test_source_uv_alignment_builds_observed_mask()
     test_dual_heads_and_gram_attention_receive_gradients()
     test_shared_denoising_noise_logvar_uses_one_observed_variance()
+    test_dual_clean_noise_head_uses_decoder_clean_and_noise_residual()
     test_cross_expansion_curriculum_uses_lower_source_support()
     test_cross_expansion_falls_back_to_union_for_offset_grids()
     test_denoise_only_objective_ignores_expanded_tokens()
     test_noise_residual_denoising_trains_noise_on_original_tokens()
+    test_clean_noise_consistency_trains_clean_and_noise_predictions()
     print("cross-expansion training assertions passed")

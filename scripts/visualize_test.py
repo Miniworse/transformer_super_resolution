@@ -59,6 +59,7 @@ def create_model_from_args(ckpt_args: dict):
             num_decoder_layers=int(ckpt_args.get("num_decoder_layers", 4)),
             separate_denoising_head=bool(ckpt_args.get("separate_denoising_head", False)),
             noise_residual_denoising=bool(ckpt_args.get("noise_residual_denoising", False)),
+            dual_clean_noise_head=bool(ckpt_args.get("dual_clean_noise_head", False)),
             shared_denoising_noise_logvar=bool(ckpt_args.get("shared_denoising_noise_logvar", False)),
             use_expanded_residual_head=bool(ckpt_args.get("use_expanded_residual_head", False)),
             expanded_residual_start_radius=float(ckpt_args.get("expanded_residual_start_radius", 0.55)),
@@ -140,6 +141,147 @@ def normalize_image_limits(*images: np.ndarray) -> tuple[float, float]:
     if not np.isfinite(low) or not np.isfinite(high) or low == high:
         low, high = float(np.nanmin(stacked)), float(np.nanmax(stacked))
     return float(low), float(high)
+
+
+def symmetric_limits(*arrays: np.ndarray, percentile: float = 99.0) -> tuple[float, float]:
+    stacked = np.concatenate([array.reshape(-1) for array in arrays])
+    limit = float(np.nanpercentile(np.abs(stacked), percentile))
+    if not np.isfinite(limit) or limit <= 0.0:
+        limit = float(np.nanmax(np.abs(stacked))) if stacked.size else 1.0
+    limit = max(limit, 1e-8)
+    return -limit, limit
+
+
+def positive_limit(*arrays: np.ndarray, percentile: float = 99.0) -> float:
+    stacked = np.concatenate([array.reshape(-1) for array in arrays])
+    limit = float(np.nanpercentile(stacked, percentile))
+    if not np.isfinite(limit) or limit <= 0.0:
+        limit = float(np.nanmax(stacked)) if stacked.size else 1.0
+    return max(limit, 1e-8)
+
+
+def wrapped_phase(values: np.ndarray) -> np.ndarray:
+    return np.angle(values)
+
+
+def wrapped_phase_diff(pred: np.ndarray, target: np.ndarray) -> np.ndarray:
+    return np.angle(np.exp(1j * (np.angle(pred) - np.angle(target))))
+
+
+def plot_denoise_components(
+    output_path: Path,
+    coords: Tensor,
+    input_values: Tensor,
+    pred_values: Tensor,
+    target_values: Tensor,
+    target_mask: Tensor,
+    scene_id: int,
+    expand_id: int,
+) -> dict[str, float]:
+    import matplotlib.pyplot as plt
+
+    coords_np = coords.detach().cpu().numpy()
+    mask_np = mask_to_numpy(target_mask)
+    input_complex = complex_from_ri(input_values)
+    pred_complex = complex_from_ri(pred_values)
+    target_complex = complex_from_ri(target_values)
+
+    pred_error = pred_complex - target_complex
+    true_noise = input_complex - target_complex
+    pred_noise = input_complex - pred_complex
+
+    real_vmin, real_vmax = symmetric_limits(
+        input_complex.real[mask_np],
+        pred_complex.real[mask_np],
+        target_complex.real[mask_np],
+    )
+    imag_vmin, imag_vmax = symmetric_limits(
+        input_complex.imag[mask_np],
+        pred_complex.imag[mask_np],
+        target_complex.imag[mask_np],
+    )
+    real_err_vmin, real_err_vmax = symmetric_limits(
+        true_noise.real[mask_np],
+        pred_noise.real[mask_np],
+        pred_error.real[mask_np],
+    )
+    imag_err_vmin, imag_err_vmax = symmetric_limits(
+        true_noise.imag[mask_np],
+        pred_noise.imag[mask_np],
+        pred_error.imag[mask_np],
+    )
+    noise_vmax = positive_limit(np.abs(true_noise[mask_np]), np.abs(pred_noise[mask_np]))
+    residual_vmax = positive_limit(np.abs(pred_error[mask_np]))
+
+    phase_input = wrapped_phase(input_complex)
+    phase_pred = wrapped_phase(pred_complex)
+    phase_target = wrapped_phase(target_complex)
+    phase_error = wrapped_phase_diff(pred_complex, target_complex)
+
+    rows = [
+        [
+            ("raw input real", input_complex.real, "coolwarm", real_vmin, real_vmax),
+            ("clean target real", target_complex.real, "coolwarm", real_vmin, real_vmax),
+            ("predicted clean real", pred_complex.real, "coolwarm", real_vmin, real_vmax),
+            ("remaining error real", pred_error.real, "coolwarm", real_err_vmin, real_err_vmax),
+        ],
+        [
+            ("raw input imag", input_complex.imag, "coolwarm", imag_vmin, imag_vmax),
+            ("clean target imag", target_complex.imag, "coolwarm", imag_vmin, imag_vmax),
+            ("predicted clean imag", pred_complex.imag, "coolwarm", imag_vmin, imag_vmax),
+            ("remaining error imag", pred_error.imag, "coolwarm", imag_err_vmin, imag_err_vmax),
+        ],
+        [
+            ("raw input phase", phase_input, "twilight", -math.pi, math.pi),
+            ("clean target phase", phase_target, "twilight", -math.pi, math.pi),
+            ("predicted clean phase", phase_pred, "twilight", -math.pi, math.pi),
+            ("wrapped phase error", phase_error, "twilight", -math.pi, math.pi),
+        ],
+        [
+            ("true noise |input-target|", np.abs(true_noise), "magma", 0.0, noise_vmax),
+            ("predicted noise |input-pred|", np.abs(pred_noise), "magma", 0.0, noise_vmax),
+            ("remaining |pred-target|", np.abs(pred_error), "magma", 0.0, residual_vmax),
+            (
+                "raw-clean amplitude gap",
+                np.abs(input_complex) - np.abs(target_complex),
+                "coolwarm",
+                *symmetric_limits(np.abs(input_complex[mask_np]) - np.abs(target_complex[mask_np])),
+            ),
+        ],
+    ]
+
+    fig, axes = plt.subplots(4, 4, figsize=(16, 14), constrained_layout=True)
+    fig.suptitle(f"Scene {scene_id:04d}, expand_{expand_id}: denoise visibility components", fontsize=13)
+    for row_axes, panels in zip(axes, rows):
+        for ax, (title, color, cmap, vmin, vmax) in zip(row_axes, panels):
+            sc = ax.scatter(
+                coords_np[mask_np, 0],
+                coords_np[mask_np, 1],
+                c=color[mask_np],
+                s=6,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+            )
+            ax.set_title(title)
+            ax.set_xlabel("u")
+            ax.set_ylabel("v")
+            ax.set_aspect("equal", adjustable="box")
+            fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.03)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+    component_error = np.stack([pred_error.real[mask_np], pred_error.imag[mask_np]], axis=-1)
+    true_noise_components = np.stack([true_noise.real[mask_np], true_noise.imag[mask_np]], axis=-1)
+    pred_noise_components = np.stack([pred_noise.real[mask_np], pred_noise.imag[mask_np]], axis=-1)
+    return {
+        "true_noise_component_std": float(true_noise_components.std()),
+        "pred_noise_component_std": float(pred_noise_components.std()),
+        "remaining_component_rmse": float(np.sqrt(np.mean(component_error**2))),
+        "phase_mae_rad": float(np.mean(np.abs(phase_error[mask_np]))),
+    }
 
 
 def plot_visualization(
@@ -353,6 +495,21 @@ def main() -> None:
 
     metrics = compute_metrics(batch_cpu, pred_cpu.unsqueeze(0), denoise_only=denoise_only)
     metrics.update({f"image/{key}": value for key, value in image_metrics.items()})
+    if denoise_only:
+        component_path = output_path.with_name(output_path.stem.replace("_comparison", "_denoise_components") + ".png")
+        component_metrics = plot_denoise_components(
+            component_path,
+            batch_cpu.coords[0],
+            input_values,
+            pred_values,
+            target_values,
+            target_mask,
+            args.scene_id,
+            args.expand_id,
+        )
+        metrics.update({f"components/{key}": value for key, value in component_metrics.items()})
+        metrics["components/figure"] = str(component_path)
+
     metrics_path = output_path.with_suffix(".json")
     with metrics_path.open("w", encoding="utf-8") as handle:
         json.dump(metrics, handle, indent=2)

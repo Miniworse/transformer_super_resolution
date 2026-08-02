@@ -153,6 +153,7 @@ def create_model(args: argparse.Namespace):
             num_decoder_layers=args.num_decoder_layers,
             separate_denoising_head=args.separate_denoising_head,
             noise_residual_denoising=args.noise_residual_denoising,
+            dual_clean_noise_head=args.dual_clean_noise_head,
             shared_denoising_noise_logvar=args.shared_denoising_noise_logvar,
             use_expanded_residual_head=args.use_expanded_residual_head,
             expanded_residual_start_radius=args.expanded_residual_start_radius,
@@ -287,6 +288,7 @@ def main() -> None:
     parser.add_argument("--lambda-uncertainty-calibration", type=float, default=0.02)
     parser.add_argument("--lambda-noise-zero-mean", type=float, default=0.0)
     parser.add_argument("--lambda-denoise-clean-charbonnier", type=float, default=0.0)
+    parser.add_argument("--lambda-clean-noise-consistency", type=float, default=0.0)
     parser.add_argument("--freq-alpha", type=float, default=2.0)
     parser.add_argument("--freq-gamma", type=float, default=1.0)
     parser.add_argument("--num-radial-bins", type=int, default=8)
@@ -302,6 +304,7 @@ def main() -> None:
     parser.add_argument("--use-complex-features", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--separate-denoising-head", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--noise-residual-denoising", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--dual-clean-noise-head", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--shared-denoising-noise-logvar", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--use-expanded-residual-head", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--expanded-residual-start-radius", type=float, default=0.55)
@@ -323,6 +326,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.noise_residual_denoising and not args.separate_denoising_head:
         parser.error("--noise-residual-denoising requires --separate-denoising-head.")
+    if args.dual_clean_noise_head and not args.noise_residual_denoising:
+        parser.error("--dual-clean-noise-head requires --noise-residual-denoising.")
     if args.init_direct_clean_denoiser and not args.noise_residual_denoising:
         parser.error("--init-direct-clean-denoiser requires --noise-residual-denoising.")
     if args.denoise_only and args.cross_expansion:
@@ -453,6 +458,7 @@ def main() -> None:
         "denoise_noise_residual": args.noise_residual_denoising,
         "lambda_noise_zero_mean": args.lambda_noise_zero_mean,
         "lambda_denoise_clean_charbonnier": args.lambda_denoise_clean_charbonnier,
+        "lambda_clean_noise_consistency": args.lambda_clean_noise_consistency,
         "freq_alpha": args.freq_alpha,
         "freq_gamma": args.freq_gamma,
         "num_radial_bins": args.num_radial_bins,
