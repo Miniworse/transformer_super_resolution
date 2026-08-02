@@ -474,6 +474,7 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         use_complex_features: bool = False,
         separate_denoising_head: bool = False,
         noise_residual_denoising: bool = False,
+        shared_denoising_noise_logvar: bool = False,
         use_expanded_residual_head: bool = False,
         expanded_residual_start_radius: float = 0.55,
         expanded_residual_radius_power: float = 1.0,
@@ -493,6 +494,7 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
         self.gram_prior_mode = gram_prior_mode
         self.separate_denoising_head = separate_denoising_head
         self.noise_residual_denoising = noise_residual_denoising
+        self.shared_denoising_noise_logvar = shared_denoising_noise_logvar
         self.use_expanded_residual_head = use_expanded_residual_head
         self.expanded_residual_start_radius = expanded_residual_start_radius
         self.expanded_residual_radius_power = expanded_residual_radius_power
@@ -660,9 +662,13 @@ class BayesianVisibilityEncoderDecoder(nn.Module):
             denoising_pred[..., 2:3],
             expansion_pred[..., 2:3],
         ).clamp(-12.0, 6.0)
+        denoising_noise_logvar = denoising_pred[..., 3:4]
+        if self.shared_denoising_noise_logvar:
+            shared_noise_logvar = masked_mean(denoising_noise_logvar, known_mask.bool(), dim=1)
+            denoising_noise_logvar = shared_noise_logvar.unsqueeze(1).expand_as(denoising_noise_logvar)
         noise_logvar = torch.where(
             known_mask.bool().unsqueeze(-1),
-            denoising_pred[..., 3:4],
+            denoising_noise_logvar,
             expansion_pred[..., 3:4],
         ).clamp(-12.0, 6.0)
 

@@ -153,6 +153,7 @@ def create_model(args: argparse.Namespace):
             num_decoder_layers=args.num_decoder_layers,
             separate_denoising_head=args.separate_denoising_head,
             noise_residual_denoising=args.noise_residual_denoising,
+            shared_denoising_noise_logvar=args.shared_denoising_noise_logvar,
             use_expanded_residual_head=args.use_expanded_residual_head,
             expanded_residual_start_radius=args.expanded_residual_start_radius,
             expanded_residual_radius_power=args.expanded_residual_radius_power,
@@ -301,10 +302,12 @@ def main() -> None:
     parser.add_argument("--use-complex-features", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--separate-denoising-head", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--noise-residual-denoising", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--shared-denoising-noise-logvar", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--use-expanded-residual-head", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--expanded-residual-start-radius", type=float, default=0.55)
     parser.add_argument("--expanded-residual-radius-power", type=float, default=1.0)
     parser.add_argument("--init-checkpoint", type=Path, default=None)
+    parser.add_argument("--init-direct-clean-denoiser", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--normalize-coords", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -320,6 +323,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.noise_residual_denoising and not args.separate_denoising_head:
         parser.error("--noise-residual-denoising requires --separate-denoising-head.")
+    if args.init_direct_clean_denoiser and not args.noise_residual_denoising:
+        parser.error("--init-direct-clean-denoiser requires --noise-residual-denoising.")
     if args.denoise_only and args.cross_expansion:
         parser.error("--denoise-only cannot be combined with --cross-expansion.")
     if args.denoise_only and args.context_expand_id is not None:
@@ -403,6 +408,13 @@ def main() -> None:
     if args.init_checkpoint is not None:
         checkpoint = torch.load(args.init_checkpoint, map_location="cpu", weights_only=True)
         state_dict = checkpoint.get("model", checkpoint)
+        if args.init_direct_clean_denoiser:
+            state_dict = dict(state_dict)
+            for key in ["denoising_head.4.weight", "denoising_head.4.bias"]:
+                if key not in state_dict:
+                    raise RuntimeError(f"Cannot sign-flip direct-clean denoiser initialization; missing {key!r}.")
+                state_dict[key] = state_dict[key].clone()
+                state_dict[key][:2].mul_(-1.0)
         incompatible = model.load_state_dict(state_dict, strict=False)
         allowed_missing = {key for key in incompatible.missing_keys if key.startswith("expanded_residual_head.")}
         unexpected = set(incompatible.unexpected_keys)
@@ -411,7 +423,8 @@ def main() -> None:
                 "Initial checkpoint is incompatible with the requested model. "
                 f"Missing={incompatible.missing_keys}, unexpected={incompatible.unexpected_keys}."
             )
-        print(f"initialized from {args.init_checkpoint}; new residual parameters={sorted(allowed_missing)}")
+        init_note = " with sign-flipped direct-clean denoising head" if args.init_direct_clean_denoiser else ""
+        print(f"initialized from {args.init_checkpoint}{init_note}; new residual parameters={sorted(allowed_missing)}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     writer = SummaryWriter(args.run_dir / "tensorboard")

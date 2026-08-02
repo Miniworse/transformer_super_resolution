@@ -70,6 +70,32 @@ def test_dual_heads_and_gram_attention_receive_gradients():
     assert torch.allclose(output.clean_mean[0, 1], output.clean_mean[0, 0] * torch.tensor([1.0, -1.0]))
 
 
+def test_shared_denoising_noise_logvar_uses_one_observed_variance():
+    model = BayesianVisibilityEncoderDecoder(
+        model_dim=32,
+        latent_dim=8,
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        num_heads=4,
+        num_frequencies=2,
+        separate_denoising_head=True,
+        noise_residual_denoising=True,
+        shared_denoising_noise_logvar=True,
+        dropout=0.0,
+    )
+    model.eval()
+    coords = torch.tensor([[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]])
+    values = torch.tensor([[[1.0, 0.2], [0.8, -0.1], [0.0, 0.0]]])
+    known = torch.tensor([[True, True, False]])
+    token_mask = torch.ones_like(known)
+    redundancy = torch.ones(1, 3, 2)
+
+    with torch.no_grad():
+        output = model(values, coords, known, redundancy, token_mask)
+
+    assert torch.allclose(output.noise_logvar[0, 0], output.noise_logvar[0, 1])
+
+
 def _write_sample(root: Path, expand_id: int, uv: np.ndarray) -> None:
     scene = 1
     noisy = np.stack([uv[:, 0] + 1.0, uv[:, 1] - 0.5], axis=-1).astype(np.float32)
@@ -245,6 +271,7 @@ if __name__ == "__main__":
     test_complex_features_are_compressed_and_masked()
     test_source_uv_alignment_builds_observed_mask()
     test_dual_heads_and_gram_attention_receive_gradients()
+    test_shared_denoising_noise_logvar_uses_one_observed_variance()
     test_cross_expansion_curriculum_uses_lower_source_support()
     test_cross_expansion_falls_back_to_union_for_offset_grids()
     test_denoise_only_objective_ignores_expanded_tokens()

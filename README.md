@@ -431,6 +431,7 @@ python scripts/train.py `
   --use-complex-features `
   --separate-denoising-head `
   --noise-residual-denoising `
+  --shared-denoising-noise-logvar `
   --selection-metric denoise-rmse `
   --lambda-orig 1.0 `
   --lambda-virtual 0.0 `
@@ -456,3 +457,14 @@ complex-noise predictor. It predicts `noise = noisy_input - clean_visibility`,
 computes `clean = noisy_input - noise`, and trains the observed likelihood on
 the complex Gaussian noise residual. The amplitude, phase, and optional
 Charbonnier terms still constrain the resulting clean visibility.
+
+To fine-tune from a direct-clean denoise checkpoint, add:
+
+```powershell
+  --init-checkpoint runs/bvt_denoise_expand0/checkpoints/best.pt `
+  --init-direct-clean-denoiser
+```
+
+This sign-flips the learned clean residual head so the residual-noise model
+starts with the same clean prediction but interprets the head output as
+`predicted_noise`.
